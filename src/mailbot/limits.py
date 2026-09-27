@@ -40,7 +40,14 @@ _429 = re.compile(r"\b429\b|rate.?limit|too many requests", re.I)
 _402 = re.compile(r"\b402\b|payment required|insufficient credit|"
                   r"insufficient (balance|funds)|credit balance is too low", re.I)
 _403 = re.compile(r"\b403\b|forbidden|permission denied", re.I)
-_5xx = re.compile(r"\b50[0-9]\b|internal server error|bad gateway|unavailable", re.I)
+# Any 5xx, not just 50[0-9]. A Cloudflare 520 came back marked
+# "retryable": true, "retry_after": 60 and was classified "other", so the
+# agent died on a failure it was explicitly told to retry.
+_5xx = re.compile(
+    r"\b5\d{2}\b|internal server error|bad gateway|gateway timeout|"
+    r"service unavailable|unavailable|cloudflare",
+    re.I,
+)
 
 
 class BudgetExhausted(RuntimeError):
@@ -133,6 +140,19 @@ class Limits:
             self._cooldown = 0.0
             self._open_until = 0.0
 
+    @staticmethod
+    def _retry_after(err: Exception) -> float:
+        """Honour a server-supplied backoff hint.
+
+        A Cloudflare 520 arrived carrying "retry_after": 60. Guessing our own
+        backoff ignored the operator's instruction and retried sooner than the
+        origin asked, which is how a single blip becomes a retry storm.
+        """
+        # The hint arrives inside a JSON error body, so the key is quoted:
+        # '"retry_after": 60'. Match with or without the quotes.
+        m = re.search(r"['\"]?retry_after['\"]?\s*[:=]\s*['\"]?(\d{1,4})", f"{err}")
+        return float(m.group(1)) if m else 0.0
+
     def record_failure(self, err: Exception) -> str:
         """Back off. Returns the kind of failure, for the caller's log."""
         kind = classify(err)
@@ -140,14 +160,12 @@ class Limits:
             self._failures += 1
             # A credit failure is terminal, not transient. Backing off and
             # retrying just wastes the remaining balance on 402s.
-            if kind == "credits":
+            if kind in ("credits", "forbidden"):
                 self._open_until = time.time() + self.backoff_max
                 return kind
-            if kind == "forbidden":
-                self._open_until = time.time() + self.backoff_max
-                return kind
-            self._cooldown = min(
-                self.backoff_base * (2 ** (self._failures - 1)), self.backoff_max
+            self._cooldown = max(
+                min(self.backoff_base * (2 ** (self._failures - 1)), self.backoff_max),
+                min(self._retry_after(err), self.backoff_max),
             )
             if self._failures >= self.breaker_threshold:
                 self._open_until = time.time() + min(self._cooldown * 2, self.backoff_max)

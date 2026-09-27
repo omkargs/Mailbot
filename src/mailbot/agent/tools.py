@@ -15,7 +15,10 @@ import logging
 import uuid
 from typing import Any, Callable
 
-from ..providers.base import Attachment, DraftRequest, EventRequest, MailProvider
+from ..providers.base import (
+    Attachment, DraftRequest, EventRequest, MailProvider, is_valid_address,
+    normalize_address,
+)
 from ..storage import db
 from . import guards
 from .client import handle_refusal
@@ -242,6 +245,25 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     # -------------------------------------------------------- approval tier
+    {
+        "name": "set_contact_permission",
+        "description": (
+            "Allow or stop unattended replies to a specific email address. Use this ONLY "
+            "when the user has clearly and explicitly asked you to email someone without "
+            "further approval — 'add him to auto-send', 'stop asking me about these', "
+            "'always reply to this person'. Do NOT use it to work around an approval you "
+            "were not given. This is a standing change to their authority rules, so a "
+            "general 'send it' is not consent to it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "string"},
+                "allow": {"type": "boolean", "description": "true to allow, false to revoke"},
+            },
+            "required": ["address", "allow"],
+        },
+    },
     {
         "name": "escalate",
         "description": "Send a question or a decision to the user instead of acting.",
@@ -490,6 +512,14 @@ class ToolBox:
         if not subject.strip() and not body.strip():
             return {"ok": False, "error": "refusing to send: no subject and no body"}
 
+        # An undeliverable address is not a judgement call. 'vamshi@' was
+        # queued for a real send because normalize_address only strips the
+        # display name — a missing domain slipped through every gate.
+        bad_addr = [a for a in to_addrs if not is_valid_address(a)]
+        if bad_addr:
+            return {"ok": False, "error":
+                    f"refusing to send to a malformed address: {', '.join(bad_addr[:3])}"}
+
         # An outbound message must never carry the same injection we would
         # refuse on the inbound side.
         if guards.detect_injection(f"{subject}\n{body}"):
@@ -578,6 +608,28 @@ class ToolBox:
         lines.append("")
         lines.append(f"_auto — {', '.join(why)[:80]}_")
         return "\n".join(lines)
+
+    def _t_set_contact_permission(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Change who may get unattended replies.
+
+        The agent used to tell the user "add them to your approved list" with
+        no way for the user to do it from chat, and then queue the same
+        messages again. This makes the rule changeable from the conversation.
+        """
+        raw = a.get("address", "")
+        addr = normalize_address(raw)
+        if not is_valid_address(addr):
+            return {"ok": False, "error": f"not a usable address: {raw!r}"}
+        allow = bool(a.get("allow", True))
+        db.set_contact_auto_send(self.p.account, addr, allow)
+        db.log_action("contact_permission", self.p.account, addr,
+                      detail="allow" if allow else "revoke")
+        if allow:
+            msg = f"{addr} added — I'll reply to them without asking from now on."
+        else:
+            msg = f"{addr} removed — I'll ask before replying to them again."
+        self._notify(msg)
+        return {"ok": True, "address": addr, "allow": allow, "echo": msg}
 
     def _t_escalate(self, a: dict[str, Any]) -> dict[str, Any]:
         self.stats["escalated"] += 1

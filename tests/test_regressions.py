@@ -657,3 +657,78 @@ def test_a_body_with_only_an_attachment_is_allowed(cfg, provider):
     })
     # Reaches the gates (queued or blocked for attachments), not the empty check.
     assert "empty message" not in (res.get("error") or "")
+
+
+# ------------------------------------------------- provider failures and addresses
+
+def test_cloudflare_520_is_a_retryable_server_error():
+    """A Cloudflare 520 arrived marked retryable with retry_after: 60 and was
+    classified 'other', so the agent died on a failure it was told to retry."""
+    from mailbot.limits import classify
+
+    e = Exception("Error code: 520 - Cloudflare 520 unknown_origin_error")
+    assert classify(e) == "server"
+
+
+def test_any_5xx_is_a_server_error():
+    from mailbot.limits import classify
+
+    for code in (500, 502, 503, 504, 520, 522, 524):
+        assert classify(Exception(f"Error code: {code}")) == "server", code
+
+
+def test_server_honours_the_servers_own_retry_after():
+    """The provider said retry_after: 60. Guessing our own backoff ignored
+    the operator's instruction and retried sooner than asked."""
+    from mailbot.limits import Limits
+
+    L = Limits(backoff_base=5.0, backoff_max=300.0)
+    L.record_failure(Exception("520 cloudflare 'retry_after': 90"))
+    assert L.wait_time() >= 90, "must not retry sooner than the server asked"
+
+
+def test_malformed_address_is_never_queued(cfg, provider):
+    """'vamshi@' was queued for a real send. normalize_address only strips
+    the display name, so a missing domain passed every gate."""
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    box = ToolBox(provider, cfg, run_id=1)
+    res = box.run("send_message", {"to": ["vamshi@"], "subject": "hi", "body": "hello there"})
+    assert not res["ok"]
+    assert "malformed" in res["error"].lower()
+    assert db.pending_approvals() == []
+
+
+def test_address_validation_cases():
+    from mailbot.providers.base import is_valid_address
+
+    for good in ("hello@blukaze.com", "a.b+c@sub.domain.co.uk"):
+        assert is_valid_address(good), good
+    for bad in ("vamshi@", "a@b", "no-at-sign.com", "@nolocal.com", "x@.com", "", "  "):
+        assert not is_valid_address(bad), bad
+
+
+def test_agent_can_change_who_gets_unattended_replies(cfg, provider):
+    """The agent told the user to 'add them to your approved list' with no way
+    to do it from chat, then queued the same messages again."""
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    box = ToolBox(provider, cfg, run_id=1)
+    res = box.run("set_contact_permission", {"address": "MSK GT <pal@example.com>", "allow": True})
+    assert res["ok"]
+    c = db.get_contact("google", "pal@example.com")
+    assert c["auto_send_ok"] == 1
+
+    # And revoking works.
+    box.run("set_contact_permission", {"address": "pal@example.com", "allow": False})
+    assert db.get_contact("google", "pal@example.com")["auto_send_ok"] == 0
+
+
+def test_permission_tool_refuses_a_malformed_address(cfg, provider):
+    from mailbot.agent.tools import ToolBox
+
+    box = ToolBox(provider, cfg, run_id=1)
+    res = box.run("set_contact_permission", {"address": "vamshi@", "allow": True})
+    assert not res["ok"]

@@ -7,7 +7,7 @@ Runs on your own machine. Answers to Telegram. Sleeps when you sleep.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-132%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-142%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -22,16 +22,23 @@ You talk to it the way you'd talk to a person:
 
 ```
 you > check my mail
-it  > Two things. DeepSeek postponed their V4 launch, and Priya wants a
-     decision on the venue deposit by Thursday - that's 5000 rupees, so I
-     left it for you. The rest was newsletters, filed.
+it  > Two things. DeepSeek postponed their V4 launch, and a venue deposit of
+     5000 needs deciding by Thursday. That's money, so I left it for you.
+     The rest was newsletters, filed.
 
-you > tell priya yes
-it  > Sent. Calendar event added for the 12th.
+you > tell priya yes and add the 12th to my calendar
+it  > Replied to priya — queued as ap_7f2c, it went out automatically since
+     you're corresponding with her. Calendar event added for the 12th.
 ```
 
 No slash commands required. It remembers what you were just talking about, so
-*"tell him yes"* works.
+*"tell her yes"* works.
+
+**Where that honesty matters:** it tells you *which* path a message took. When
+something queues instead of sending, it says so and gives you the id to
+approve. It never claims it sent something it only prepared. And when the
+provider is down or you've run out of credit, it says that too instead of
+going quiet — a silent agent and a broken one look identical from outside.
 
 ## What it actually does
 
@@ -58,9 +65,9 @@ it caution. Mailbot decides, per message:
 Every unattended send is reported to you with the reason it was allowed:
 
 ```
-Sent -> Omkar
+Sent -> priya
 re: tour
-"hey Omkar good to hear from u bro! 12th of oct works i'm in"
+"hey priya good to hear from u bro! the 12th works, i'm in"
 _auto - existing thread
 ```
 

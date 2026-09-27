@@ -10,6 +10,7 @@ Normalised message dict:
 from __future__ import annotations
 
 import abc
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,6 +144,22 @@ class MailProvider(abc.ABC):
     @abc.abstractmethod
     def delete_event(self, event_id: str) -> bool:
         """Irreversible. Callers must gate this."""
+
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+\.[^@\s]+$")
+
+
+def is_valid_address(addr: str) -> bool:
+    """Does this look like a deliverable email address?
+
+    'vamshi@' reached the approval queue: normalize_address() only strips the
+    display name, so a truncated address passed every gate and was queued for
+    a real send. A missing domain is not a judgement call — it cannot be
+    delivered to, so it must never be queued.
+    """
+    if not addr:
+        return False
+    return bool(_EMAIL.match(addr.strip()))
 
 
 def normalize_address(addr: str) -> str:
