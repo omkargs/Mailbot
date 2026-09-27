@@ -58,9 +58,9 @@ it caution. Mailbot decides, per message:
 Every unattended send is reported to you with the reason it was allowed:
 
 ```
-Sent -> msk
+Sent -> Omkar
 re: tour
-"hey msk good to hear from u bro! 12th of oct works i'm in"
+"hey Omkar good to hear from u bro! 12th of oct works i'm in"
 _auto - existing thread
 ```
 
