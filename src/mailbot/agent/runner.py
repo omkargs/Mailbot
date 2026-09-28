@@ -85,7 +85,8 @@ def run_once(
 
     run_id = db.start_run(account, trigger, cfg.router.model)
     client = build_client(cfg.router)
-    box = ToolBox(provider, cfg, run_id, notify=notify)
+    # Email-driven: standing authority changes are refused in this context.
+    box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=False)
 
     pending = messages if messages is not None else db.unprocessed(account, limit=cfg.agent.max_drafts_per_run)
     if not pending:
@@ -102,12 +103,17 @@ def run_once(
     ctx.append("")
     for m in pending[:12]:
         body = (m.get("body") or "").strip()
-        ctx.append(f"## id={m['id']}  from={m['sender']}  {m.get('date','')}")
-        ctx.append(f"subject: {m.get('subject','')[:120]}")
+        # Sender and subject are attacker-controlled. A subject like "ignore
+        # previous instructions" sitting outside the fence reads as an
+        # instruction; inside, it reads as data.
+        ctx.append(guards.fence(
+            f"from: {m['sender']}  date: {m.get('date', '')}\n"
+            f"subject: {m.get('subject', '')[:120]}", "headers"))
         if body:
             ctx.append(guards.fence(body[:1500], "body"))
         else:
             ctx.append(guards.fence((m.get("snippet") or "")[:300], "snippet"))
+        ctx.append(f"message id: {m['id']}")
         ctx.append("")
 
     listed, unlisted = pending[:12], pending[12:]
@@ -318,6 +324,44 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
             notify(f"Deleted calendar event {event_id}." if ok
                     else f"Could not delete {event_id}.")
         return {"ok": ok, "sent": ok}
+
+    # Calendar invites approved by the user execute here.
+    if kind == "calendar_invite":
+        from ..providers.base import EventRequest
+
+        attendees = [a for a in payload.get("attendees", []) if a]
+        if not attendees:
+            return {"ok": False, "error": "invite has no attendees left — refusing"}
+        ev = provider.create_event(EventRequest(
+            summary=payload.get("summary", ""), start=payload.get("start", ""),
+            end=payload.get("end", ""), description=payload.get("description", ""),
+            location=payload.get("location", ""), attendees=attendees))
+        ok = bool(ev)
+        db.log_action("calendar_invite", account, ev.get("id", "") if ev else "",
+                      actor="user", approval_id=approval_id,
+                      detail=f"{payload.get('summary', '')} -> {', '.join(attendees)}")
+        if notify:
+            notify(f"Invite sent to {', '.join(attendees)}." if ok
+                    else "Could not create the event.")
+        return {"ok": ok, "sent": ok}
+
+    # Re-validate a queued send at execution time. The payload cannot change
+    # under us (it is fixed in the DB row), but the world can: escalation
+    # keywords may have been added since queueing, and this is the last
+    # checkpoint before bytes leave the box.
+    from ..providers.base import Attachment
+    from ..providers.base import is_valid_address
+
+    from . import guards as _guards
+    to_addrs = payload.get("to", [])
+    bad = [a for a in to_addrs if not is_valid_address(a)]
+    if bad:
+        return {"ok": False, "error": f"refusing: malformed address {bad[0]!r}"}
+    if _guards.detect_injection(f"{payload.get('subject', '')}\n{payload.get('body', '')}"):
+        db.log_action("send_blocked", account, ", ".join(to_addrs),
+                      actor="gate", approval_id=approval_id,
+                      detail="injection signals at execution time")
+        return {"ok": False, "error": "blocked: injection signals at execution time"}
 
     ok = provider.send(DraftRequest(
         to=payload["to"], subject=payload["subject"],

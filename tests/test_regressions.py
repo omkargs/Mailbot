@@ -715,7 +715,7 @@ def test_agent_can_change_who_gets_unattended_replies(cfg, provider):
     from mailbot.agent.tools import ToolBox
     from mailbot.storage import db
 
-    box = ToolBox(provider, cfg, run_id=1)
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
     res = box.run("set_contact_permission", {"address": "MSK GT <pal@example.com>", "allow": True})
     assert res["ok"]
     c = db.get_contact("google", "pal@example.com")
@@ -726,9 +726,21 @@ def test_agent_can_change_who_gets_unattended_replies(cfg, provider):
     assert db.get_contact("google", "pal@example.com")["auto_send_ok"] == 0
 
 
+def test_scan_origin_cannot_change_who_gets_unattended_replies(cfg, provider):
+    """The email-driven loop gets the same tool name but a hard refusal:
+    standing authority is chat-only."""
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=False)
+    res = box.run("set_contact_permission", {"address": "pal@example.com", "allow": True})
+    assert not res["ok"]
+    assert db.get_contact("google", "pal@example.com") is None
+
+
 def test_permission_tool_refuses_a_malformed_address(cfg, provider):
     from mailbot.agent.tools import ToolBox
 
-    box = ToolBox(provider, cfg, run_id=1)
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
     res = box.run("set_contact_permission", {"address": "vamshi@", "allow": True})
     assert not res["ok"]

@@ -104,7 +104,12 @@ class GmailProvider(MailProvider):
             creds = Credentials.from_authorized_user_file(self.token_file, SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            Path(self.token_file).write_text(creds.to_json())
+            p = Path(self.token_file)
+            p.write_text(creds.to_json())
+            # Refreshed tokens are rewritten silently in the background. Without
+            # this the file inherits the process umask (usually 644) and the
+            # OAuth token becomes readable by every user on the box.
+            p.chmod(0o600)
         return creds
 
     def valid(self) -> bool:

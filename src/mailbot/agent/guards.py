@@ -34,14 +34,41 @@ INJECTION_PATTERNS = [
     r"act as (an?|the)\b.*\b(assistant|admin|root|system)",
     r"reveal|print|show (me )?(your |the )?(system prompt|instructions|api key|token|password)",
     r"forward (this|all|the) (mail|email|message) to",
+    r"forward (my|your|this|that|these|those|the|all|everything|it) .{0,40}\bto\b",
     r"reply (to )?all with (the |your )?(api key|token|password|credentials)",
-    r"do not (tell|inform|notify|mention to) (the )?(user|owner|human)",
-    r"without (asking|informing|notifying|approval)",
+    r"do not (tell|inform|notify|mention to|mention|let) (the )?(user|owner|human|them|him|her|me|anyone)",
+    r"don't (tell|mention|inform|notify)\b",
+    r"without (asking|informing|notifying|telling|letting|looping|approval)",
+    r"without (telling|letting|looping).{0,25}(owner|user|anyone|them|him|her|in|me)\b",
+    r"no need to (tell|inform|notify|mention|let|loop).{0,25}(know|owner|user|anyone|them|him|her|in|me)\b",
+    r"keep (this|that|it).{0,25}between us",
+    r"\bbetween us\b",
     r"send (this|it|the) to \S+@\S+",
+    r"send (that|these|those|everything|all|my|your|the file|the message|the attachment|the statement) .{0,30}\bto \S+@\S+",
+    r"(otp|one.time.code|password|passcode|ssn|routing.number|account.number).{0,12}([:=]|is)\s*\S+",
     r"<\s*IMPORTANT\s*>",
     r"\[\[SYSTEM\]\]",
     r"###\s*(SYSTEM|INSTRUCTIONS)",
 ]
+
+# Leet-speak and invisible characters are the cheapest filter evasions:
+# "ign0re", "ig<ZWSP>nore", "p a s s w o r d". Detection runs on the raw
+# text AND on this normalised copy, so evasion has to beat both.
+_LEET = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s",
+    "7": "t", "8": "b", "9": "g", "$": "s", "@": "a", "!": "i", "+": "t",
+})
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200d\u2060-\u206f\ufeff\u00ad]")
+_NON_ALNUM = re.compile(r"[^a-z0-9@.\s]")
+
+
+def normalise_for_detection(content: str) -> str:
+    """Lowercase, de-obfuscate, collapse. Detection-only copy."""
+    s = (content or "").lower()
+    s = _ZERO_WIDTH.sub("", s)
+    s = s.translate(_LEET)
+    s = _NON_ALNUM.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def fence(content: str, label: str = "email") -> str:
@@ -55,11 +82,22 @@ def fence(content: str, label: str = "email") -> str:
 
 
 def detect_injection(content: str) -> list[str]:
-    """Return the list of injection signals found. Empty = clean."""
+    """Return the list of injection signals found. Empty = clean.
+
+    Matches against the raw text and a de-obfuscated copy, so leet-speak
+    ("ign0re"), zero-width characters, and dotted-out words ("p.a.s.s.w.o.r.d")
+    all still trip the same patterns.
+    """
     if not content:
         return []
-    low = content.lower()
-    return [p for p in INJECTION_PATTERNS if re.search(p, low, re.M | re.I)]
+    texts = {content.lower(), normalise_for_detection(content)}
+    hits: list[str] = []
+    for p in INJECTION_PATTERNS:
+        for t in texts:
+            if re.search(p, t, re.M | re.I):
+                hits.append(p)
+                break
+    return hits
 
 
 # ------------------------------------------------------------------- decision
@@ -129,9 +167,20 @@ def decide(
     if inj:
         return Decision(False, f"prompt-injection signals in content: {len(inj)}", "high", ["injection"])
 
-    # 6. Content escalation keywords.
-    hay = f"{subject}\n{body}".lower()
-    hits = [k for k in cfg.escalation_keywords if k in hay]
+    # 6. Content escalation keywords. Checked three ways: raw text, the
+    # de-obfuscated copy (leet-speak, zero-width chars), and a spaceless
+    # copy ("p a s s w o r d", "o-t-p") — evasion has to beat all three.
+    hay_raw = f"{subject}\n{body}".lower()
+    hay_norm = normalise_for_detection(f"{subject}\n{body}")
+    # Spaceless AND punctuationless: "p a s s w o r d", "p.a.s.s.w.o.r.d",
+    # "one-time code" all collapse to their keyword form here.
+    hay_flat = re.sub(r"[\s.\-_]+", "", hay_norm)
+    hits = []
+    for k in cfg.escalation_keywords:
+        kl = k.lower()
+        kl_flat = re.sub(r"[\s.\-_]+", "", kl)
+        if kl in hay_raw or kl in hay_norm or kl_flat in hay_flat:
+            hits.append(k)
     if hits:
         signals.append(f"keywords: {', '.join(hits[:4])}")
         return Decision(False, f"escalation keyword(s) present — {', '.join(hits[:4])}", "high", signals)

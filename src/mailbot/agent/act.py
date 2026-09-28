@@ -80,16 +80,22 @@ def decide_and_act(
     from .runner import _cached_tool_list, _system_blocks
     from .tools import ToolBox
     from ..storage import db
+    from . import guards as _guards
 
     db.migrate()
     run_id = db.start_run(provider.account, "act", cfg.router.model)
     try:
         client = build_client(cfg.router)
-        box = ToolBox(provider, cfg, run_id, notify=notify)
+        # Job-driven, same rule as scan: no standing authority changes.
+        box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=False)
         system = _system_blocks(ACT_PROMPT)
+        # Job data routinely contains email text (subjects, snippets, stored
+        # prompts). Fence it: a scheduled job must never become a delayed
+        # prompt injection.
+        fenced = _guards.fence(data[:12000], "scheduled-job data")
         messages: list[dict[str, Any]] = [{
             "role": "user",
-            "content": f"# Job: {question}\n\n# Data\n{data[:12000]}",
+            "content": f"# Job: {question}\n\n# Data\n{fenced}",
         }]
 
         totals = {"input_tokens": 0, "output_tokens": 0}

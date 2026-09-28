@@ -165,7 +165,9 @@ def answer(
     run_id = db.start_run(provider.account, "chat", cfg.router.model)
     try:
         client = build_client(cfg.router)
-        box = ToolBox(provider, cfg, run_id, notify=notify)
+        # Owner-originated chat: the user is in the room, so standing
+        # authority changes (auto-send allowlist) are legitimate here.
+        box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=True)
         system = _system_blocks(CONVERSATION_PROMPT.format(
             profile=build_prompt(provider.account, cfg),
         ))

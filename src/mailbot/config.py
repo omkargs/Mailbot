@@ -168,7 +168,12 @@ class AgentConfig:
             "escalation_keywords",
             ["invoice", "payment", "wire", "contract", "legal", "attorney", "invoice",
              "password", "otp", "verify", "bank", "account number", "salary", "offer",
-             "termination", "medical", "diagnosis", "passport", "ssn"],
+             "termination", "medical", "diagnosis", "passport", "ssn",
+             # Spelled-out and hyphenated forms attackers actually use.
+             # "ssn" alone never matches "social security number".
+             "social security", "one-time code", "one time code",
+             "date of birth", "bank transfer", "wire transfer",
+             "routing number", "deposit"],
         )
     )
     daily_token_cap: int = field(default_factory=lambda: int(_v("AGENT_DAILY_TOKEN_CAP", "500000")))

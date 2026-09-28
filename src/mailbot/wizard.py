@@ -127,7 +127,9 @@ def ensure_config_json() -> Path:
                 "invoice", "payment", "wire", "contract", "legal", "attorney",
                 "bank", "salary", "offer", "termination", "medical", "passport",
                 "ssn", "password", "otp", "verify", "account number",
-                "recovery code", "2fa", "mfa",
+                "recovery code", "2fa", "mfa", "social security",
+                "one-time code", "one time code", "date of birth",
+                "bank transfer", "wire transfer", "routing number", "deposit",
             ],
         }, indent=2))
         p.chmod(0o600)

@@ -77,6 +77,9 @@ class BaseNotifier:
     def send(self, text: str, approval_id: str = "", **kw: Any) -> str | None:
         return None
 
+    def poll_once(self) -> list[dict[str, Any]]:
+        return []
+
     def interactive(self) -> bool:
         return False
 
@@ -197,6 +200,15 @@ class TelegramNotifier(BaseNotifier):
             msg = upd.get("message") or {}
             # Never respond to our own messages, or a bot's.
             if (msg.get("from") or {}).get("is_bot"):
+                continue
+            # SECURITY: only the owner's chat may talk to the agent. Telegram
+            # delivers updates from ANY chat that messages the bot — without
+            # this check a stranger gets a conversational agent over the
+            # victim's mailbox (reads are free) plus /approve attempts.
+            chat = msg.get("chat") or {}
+            if self.chat_id and str(chat.get("id", "")) != str(self.chat_id):
+                log.warning("telegram: dropped update from unknown chat id=%s",
+                            chat.get("id"))
                 continue
             text = (msg.get("text") or "").strip()
             if not text:
