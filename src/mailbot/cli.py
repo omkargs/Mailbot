@@ -595,6 +595,12 @@ def main() -> int:
         return cmd_doctor(a, c)
     p.set_defaults(fn=_fn_doctor)
 
+    p = sub.add_parser("demo", help="10-second fake-inbox demo, no credentials needed")
+    def _fn_demo(a, c):
+        from .demo import run_demo
+        return run_demo()
+    p.set_defaults(fn=_fn_demo)
+
     args = ap.parse_args()
     logging_setup.setup(logging.DEBUG if args.verbose else logging.INFO)
 

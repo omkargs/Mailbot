@@ -2,14 +2,26 @@
 
 # Mailbot
 
-**An autonomous agent for your inbox.**
+**The inbox colleague that tells you what it did — and what it refused to do.**
 Runs on your own machine. Answers to Telegram. Sleeps when you sleep.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-142%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen.svg)]()
+[![Setup](https://img.shields.io/badge/setup-60s%20wizard-blue.svg)](SETUP.md)
+
+*No dashboard. No plugin. No cloud account. Your mail never leaves your box
+except to the model endpoint you choose.*
 
 </div>
+
+> **Try the whole idea in 10 seconds, no Gmail needed:**
+> ```bash
+> git clone https://github.com/omkargs/Mailbot && cd Mailbot
+> python3 -m venv .venv && .venv/bin/pip install -q -e . && .venv/bin/mail-agent demo
+> ```
+> Five fake emails. Watch it send one, file one, and refuse three — with reasons.
+> Then `./setup.sh --fast` points it at your real inbox. Full guide: **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -73,6 +85,20 @@ _auto - existing thread
 
 The authority rules live in **code**, not in a prompt. A clever model cannot
 talk its way past them.
+
+## Why not Superhuman AI / Shortwave / a Gmail plugin?
+
+| | Mailbot | AI inbox startups | Gmail plugins |
+|---|---|---|---|
+| Your mail on someone else's server | **No** — your box, your OAuth token | Yes | Yes |
+| Writes like *you* (mined from sent mail) | **Yes** — per-relationship voice | One flat voice | Templates |
+| Says *why* it sent vs queued, with ids | **Yes, every time** | Sometimes | Rarely |
+| Spend firewall (caps, breaker, no blind retries) | **On by default** | Trust us | N/A |
+| Works over plain SSH / headless server | **Yes** | Browser only | Browser only |
+| Price | **Free, MIT** | $20–30/mo | Freemium + data |
+
+If you like this, star it — stars are the only marketing budget:
+`https://github.com/omkargs/Mailbot`.
 
 ## Install
 
