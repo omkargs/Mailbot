@@ -89,3 +89,44 @@ def test_doctor_reports_problems_not_ok(monkeypatch, tmp_path, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "doctor:" in out
+
+
+def _setup_args(**kw):
+    class Args:
+        step = ""
+        non_interactive = False
+        yes = False
+        fast = False
+        dry_run = False
+        import_env = False
+        skip_voice = False
+        skip_service = False
+
+    for k, v in kw.items():
+        setattr(Args, k, v)
+    return Args()
+
+
+def test_dry_run_writes_nothing(monkeypatch, tmp_path, capsys):
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    rc = W.cmd_setup(_setup_args(dry_run=True), C.load())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert not (tmp_path / "cfg" / ".secrets").exists()
+    assert not (tmp_path / "cfg" / "config.json").exists()
+
+
+def test_fast_skips_voice_service_chat(monkeypatch, tmp_path, capsys):
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    for k in ("ROUTER_API_KEY", "ROUTER_BASE_URL", "ROUTER_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    rc = W.cmd_setup(_setup_args(fast=True), C.load())
+    assert rc == 1  # missing key + creds: honest failure, not a crash
+    out = capsys.readouterr().out
+    assert "[1/" in out
+    assert "finished in" in out
+    state = __import__("json").loads((tmp_path / "cfg" / ".setup-state.json").read_text())
+    assert state.get("provider") == "missing-key"
+    assert "voice" not in state  # skipped, not failed
+    assert "service" not in state

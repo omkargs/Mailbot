@@ -577,9 +577,11 @@ def main() -> int:
 
     p = sub.add_parser("setup", help="guided setup: provider, google, chat (headless-friendly)")
     p.add_argument("--yes", action="store_true", help="accept defaults, skip optional prompts")
+    p.add_argument("--fast", action="store_true", help="fast path: defaults, skip voice/service/chat prompts")
     p.add_argument("--non-interactive", action="store_true", help="never prompt; read from env")
     p.add_argument("--import-env", action="store_true", help="copy known env vars into .secrets")
-    p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start")
+    p.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start|verify")
     p.add_argument("--skip-voice", action="store_true")
     p.add_argument("--skip-service", action="store_true")
     def _fn_setup(a, c):

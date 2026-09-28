@@ -79,8 +79,11 @@ talk its way past them.
 ```bash
 git clone https://github.com/omkargs/Mailbot
 cd Mailbot
-./setup.sh
+./setup.sh --fast
 ```
+
+Full guide (human + coding-agent paths, headless OAuth, troubleshooting):
+**[SETUP.md](SETUP.md)**.
 
 That one command:
 

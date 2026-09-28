@@ -2,15 +2,20 @@
 
 Replaces the old two-layer flow (setup.sh bash + setup.py interactive) with:
 
-    mail-agent setup [--yes] [--non-interactive] [--step PROVIDER|GOOGLE|CHAT|VERIFY]
-                     [--import-env] [--skip-voice] [--skip-service]
+    mail-agent setup [--fast] [--yes] [--non-interactive] [--step PROVIDER|GOOGLE|CHAT|VERIFY]
+                     [--import-env] [--dry-run] [--skip-voice] [--skip-service]
+
+Fast paths:
+- Human, normal machine:      ./setup.sh  (or: mail-agent setup --fast)
+- Coding agent, headless box:  mail-agent setup --non-interactive --import-env
+- Diagnose anything:           mail-agent doctor
 
 Design rules:
 1. Three questions max in interactive mode. Everything else has a sane default.
 2. Headless-first. Never requires a local browser. Prints an OAuth URL the
    user can open on their phone/laptop, then accepts a pasted code.
-3. Non-interactive from env, so a coding agent can run it with one prompt:
-   `mail-agent setup --non-interactive --import-env`.
+3. Non-interactive from env, so a coding agent can run it with one prompt
+   (see SETUP.md).
 4. Idempotent + resumable. Running twice never corrupts a working install.
 5. Never echoes a secret. Never claims success for a failed step.
 """
@@ -193,11 +198,46 @@ def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> boo
 
 
 def cmd_setup(args, cfg) -> int:
+    import time as _time
+
     only = (getattr(args, "step", "") or "").lower()
+    if only == "verify":
+        only = ""  # verify = full pass ending in the honest summary
     non_interactive = bool(getattr(args, "non_interactive", False))
-    yes = bool(getattr(args, "yes", False)) or non_interactive
+    fast = bool(getattr(args, "fast", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+    yes = bool(getattr(args, "yes", False)) or non_interactive or fast
+    skip_voice = bool(getattr(args, "skip_voice", False)) or fast
+    skip_service = bool(getattr(args, "skip_service", False)) or fast
     state = _load_state()
 
+    # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
+    plan = []
+    if not only or only == "provider":
+        plan.append("provider")
+    if not only or only == "google":
+        plan.append("google")
+    if (not only or only == "chat") and not yes:
+        plan.append("chat")
+    if (not only or only == "voice") and not skip_voice:
+        plan.append("voice")
+    if (not only or only == "start") and not skip_service:
+        plan.append("service")
+    plan.append("summary")
+
+    if dry_run:
+        print("  dry-run — would execute, in order:")
+        for i, step in enumerate(plan, 1):
+            print(f"    [{i}/{len(plan)}] {step}")
+        print("  nothing written. Remove --dry-run to execute.")
+        return 0
+
+    t0 = _time.perf_counter()
+
+    def _hdr(i: int, name: str):
+        print(f"\n  [{i}/{len(plan)}] {name}…")
+
+    idx = 0
     if getattr(args, "import_env", False) or non_interactive:
         written = import_env()
         if written:
@@ -207,6 +247,8 @@ def cmd_setup(args, cfg) -> int:
 
     # --- provider ---
     if not only or only == "provider":
+        idx += 1
+        _hdr(idx, "provider")
         from .agent import discovery as D
 
         s = read_secrets()
@@ -248,6 +290,8 @@ def cmd_setup(args, cfg) -> int:
 
     # --- google ---
     if not only or only == "google":
+        idx += 1
+        _hdr(idx, "google (Gmail + Calendar)")
         from .providers import build_providers
         from .config import load as _load
 
@@ -278,8 +322,10 @@ def cmd_setup(args, cfg) -> int:
                     print("  ! google sign-in did not complete")
                     state["google"] = "failed"
 
-    # --- chat (optional, skipped by default with --yes) ---
+    # --- chat (optional, skipped with --yes / --fast) ---
     if (not only or only == "chat") and not yes:
+        idx += 1
+        _hdr(idx, "chat (optional)")
         if _tty():
             try:
                 ans = input("  Set up Telegram now? [y/N]: ").strip().lower()
@@ -294,8 +340,10 @@ def cmd_setup(args, cfg) -> int:
     else:
         state.setdefault("telegram", "skipped")
 
-    # --- voice ---
-    if (not only or only == "voice") and not getattr(args, "skip_voice", False):
+    # --- voice (slow: reads sent mail; skipped by --fast) ---
+    if (not only or only == "voice") and not skip_voice:
+        idx += 1
+        _hdr(idx, "voice profile (reads sent mail, ~1 min)")
         if state.get("google") == "ok":
             try:
                 from .setup import step_voice
@@ -308,13 +356,17 @@ def cmd_setup(args, cfg) -> int:
             state.setdefault("voice", "skipped-no-mailbox")
 
     # --- service ---
-    if (not only or only == "start") and not getattr(args, "skip_service", False):
+    if (not only or only == "start") and not skip_service:
+        idx += 1
+        _hdr(idx, "service")
         print("  service: on Daytona/container use `./start.sh bg` "
               "(systemd user units are unavailable there).")
         state.setdefault("service", "manual")
 
     _save_state(state)
+    dt = _time.perf_counter() - t0
     print("\n  setup state: " + ", ".join(f"{k}={v}" for k, v in sorted(state.items())))
+    print(f"  finished in {dt:.0f}s")
 
     # Honest exit code: 0 only if provider + google are OK.
     if state.get("provider") == "ok" and state.get("google") == "ok":
