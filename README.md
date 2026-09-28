@@ -97,9 +97,6 @@ talk its way past them.
 | Works over plain SSH / headless server | **Yes** | Browser only | Browser only |
 | Price | **Free, MIT** | $20–30/mo | Freemium + data |
 
-If you like this, star it — stars are the only marketing budget:
-`https://github.com/omkargs/Mailbot`.
-
 ## Install
 
 ```bash
