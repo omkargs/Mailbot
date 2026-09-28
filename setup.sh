@@ -103,7 +103,30 @@ setkv() {
 say "${BOLD}mail-agent setup${RST}"
 say "${DIM}$REPO${RST}"
 
-# ---------------------------------------------------------------- python
+# Fast path: venv + new unified wizard. Keeps ./setup.sh working as the
+# documented entry point while the real logic lives in `mail-agent setup`
+# (headless-friendly, --non-interactive, resumable). Falls through to the
+# legacy flow below only if the CLI is unavailable.
+if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
+  if [ ! -d "$VENV" ]; then
+    if command -v uv >/dev/null 2>&1; then
+      uv venv "$VENV"
+    else
+      python3 -m venv "$VENV"
+    fi
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    VIRTUAL_ENV="$VENV" uv pip install -e "$REPO" -q 2>/dev/null || "$VENV/bin/pip" install -e "$REPO" -q
+  else
+    "$VENV/bin/pip" install -e "$REPO" -q
+  fi
+  if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
+    exec "$VENV/bin/mail-agent" setup "$@"
+  fi
+  warn "new wizard unavailable, falling back to legacy prompts"
+fi
+
+# ---------------------------------------------------------------- python (legacy)
 hdr "Python environment"
 if [ ! -d "$VENV" ]; then
   if command -v uv >/dev/null 2>&1; then

@@ -1,0 +1,386 @@
+"""Unified setup wizard: one command, headless-first, agent-friendly.
+
+Replaces the old two-layer flow (setup.sh bash + setup.py interactive) with:
+
+    mail-agent setup [--yes] [--non-interactive] [--step PROVIDER|GOOGLE|CHAT|VERIFY]
+                     [--import-env] [--skip-voice] [--skip-service]
+
+Design rules:
+1. Three questions max in interactive mode. Everything else has a sane default.
+2. Headless-first. Never requires a local browser. Prints an OAuth URL the
+   user can open on their phone/laptop, then accepts a pasted code.
+3. Non-interactive from env, so a coding agent can run it with one prompt:
+   `mail-agent setup --non-interactive --import-env`.
+4. Idempotent + resumable. Running twice never corrupts a working install.
+5. Never echoes a secret. Never claims success for a failed step.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from .setup import config_dir, read_secrets, write_secret
+
+STATE_FILE = "setup-state.json"
+
+# Env vars the wizard will import with --import-env / --non-interactive.
+# Deliberately the same names config._secrets() already honours, so env
+# always wins at runtime even before it is written to .secrets.
+IMPORT_KEYS = (
+    "ROUTER_BASE_URL",
+    "ROUTER_API_KEY",
+    "ROUTER_MODEL",
+    "GOOGLE_CREDENTIALS",
+    "GOOGLE_ACCOUNT",
+    "GOOGLE_DISPLAY_NAME",
+    "GOOGLE_CALENDAR_ENABLED",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_USER_ID",
+    "AGENT_SEND_MODE",
+    "AGENT_SCAN_INTERVAL",
+    "AGENT_DAILY_TOKEN_CAP",
+    "AGENT_BRIEF_HOUR",
+)
+
+DEFAULTS = {
+    "ROUTER_BASE_URL": "https://router.bynara.id",
+    "ROUTER_MODEL": "combo/claude2mail",
+    "AGENT_SEND_MODE": "auto",
+    "AGENT_SCAN_INTERVAL": "300",
+    "AGENT_DAILY_TOKEN_CAP": "2000000",
+    "AGENT_BRIEF_HOUR": "7",
+    "GOOGLE_CALENDAR_ENABLED": "true",
+}
+
+
+def _tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _state_path() -> Path:
+    return config_dir() / ".setup-state.json"
+
+
+def _load_state() -> dict[str, Any]:
+    try:
+        return json.loads(_state_path().read_text())
+    except Exception:
+        return {}
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    try:
+        p = _state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state, indent=2))
+    except Exception:
+        pass
+
+
+def import_env() -> list[str]:
+    """Copy known env vars into .secrets. Returns keys written (names only)."""
+    written = []
+    for k in IMPORT_KEYS:
+        v = os.environ.get(k, "").strip()
+        if not v:
+            continue
+        # GOOGLE_CREDENTIALS may be a path or raw JSON; normalise to a path.
+        if k == "GOOGLE_CREDENTIALS" and v.lstrip().startswith("{"):
+            dest = config_dir() / "google-credentials.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(v)
+            dest.chmod(0o600)
+            write_secret("GOOGLE_CREDENTIALS", str(dest))
+            written.append(k)
+        else:
+            write_secret(k, v)
+            written.append(k)
+    return written
+
+
+def apply_defaults() -> None:
+    s = read_secrets()
+    for k, v in DEFAULTS.items():
+        if not s.get(k):
+            write_secret(k, v)
+
+
+def ensure_config_json() -> Path:
+    p = config_dir() / "config.json"
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "enabled_accounts": [],
+            "auto_send_contacts": [],
+            "never_auto_send": [],
+            "escalation_keywords": [
+                "invoice", "payment", "wire", "contract", "legal", "attorney",
+                "bank", "salary", "offer", "termination", "medical", "passport",
+                "ssn", "password", "otp", "verify", "account number",
+                "recovery code", "2fa", "mfa",
+            ],
+        }, indent=2))
+        p.chmod(0o600)
+    return p
+
+
+def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> bool:
+    """OAuth without requiring a local browser.
+
+    1. Builds the consent URL and prints it (open on any device).
+    2. Runs a loopback server when possible; falls back to paste-the-code.
+    Returns True iff a valid token was stored.
+    """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    from .providers.gmail import SCOPES
+
+    out = out_token or Path(os.environ.get("MAIL_AGENT_TOKEN",
+                                           str(config_dir() / "google-token.json")))
+    # Step 1: always show the URL first so the user can act while we listen.
+    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+    try:
+        url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    except Exception as e:
+        print(f"  could not build consent URL: {type(e).__name__}")
+        return False
+    print("\n  Open this URL on ANY device (phone/laptop), approve, continue:")
+    print(f"\n  {url}\n")
+
+    # Step 2: loopback server (works over `ssh -L 8080:localhost:8080` too).
+    for port in (8080, 8765, 0):
+        try:
+            flow2 = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+            creds = flow2.run_local_server(port=port if port else 0,
+                                           open_browser=False,
+                                           authorization_prompt_message="",
+                                           success_message="Approved — return to the terminal.")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(creds.to_json())
+            out.chmod(0o600)
+            print("  token stored (mode 600)")
+            return True
+        except Exception:
+            continue
+
+    # Step 3: manual code paste (old Desktop clients still honour OOB-ish copy).
+    if not _tty():
+        print("  no browser flow completed and stdin is not a TTY — "
+              "re-run with a terminal to paste the code, or auth locally "
+              "and copy google-token.json up.")
+        return False
+    try:
+        code = input("  Paste the code here (blank to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if not code:
+        return False
+    try:
+        flow.fetch_token(code=code)
+    except Exception as e:
+        print(f"  code rejected: {str(e)[:140]}")
+        return False
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(flow.credentials.to_json())
+    out.chmod(0o600)
+    print("  token stored (mode 600)")
+    return True
+
+
+def cmd_setup(args, cfg) -> int:
+    only = (getattr(args, "step", "") or "").lower()
+    non_interactive = bool(getattr(args, "non_interactive", False))
+    yes = bool(getattr(args, "yes", False)) or non_interactive
+    state = _load_state()
+
+    if getattr(args, "import_env", False) or non_interactive:
+        written = import_env()
+        if written:
+            print(f"  imported from env: {', '.join(written)}")
+    apply_defaults()
+    ensure_config_json()
+
+    # --- provider ---
+    if not only or only == "provider":
+        from .agent import discovery as D
+
+        s = read_secrets()
+        base = (s.get("ROUTER_BASE_URL") or DEFAULTS["ROUTER_BASE_URL"]).strip()
+        base = D.normalise_base(base)
+        write_secret("ROUTER_BASE_URL", base)
+        key = s.get("ROUTER_API_KEY", "")
+        model = s.get("ROUTER_MODEL", "") or DEFAULTS["ROUTER_MODEL"]
+        if not key:
+            if non_interactive or not _tty():
+                print("  ! ROUTER_API_KEY not set — export it and re-run "
+                      "(or `mail-agent setup --import-env`).")
+            else:
+                import getpass
+                try:
+                    key = getpass.getpass("  Router API key (hidden): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    key = ""
+                if key:
+                    write_secret("ROUTER_API_KEY", key)
+        if key:
+            models = D.list_models(base, key) or []
+            if model not in models and models:
+                ranked = D.rank(models)
+                model = ranked[0] if yes else model
+                write_secret("ROUTER_MODEL", model)
+            res = D.probe(base, key, model)
+            if res["ok"]:
+                print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
+                state["provider"] = "ok"
+            else:
+                print(f"  ! provider FAILED: {res['error'][:160]}")
+                state["provider"] = "failed"
+                if non_interactive:
+                    _save_state(state)
+                    return 1
+        else:
+            state["provider"] = "missing-key"
+
+    # --- google ---
+    if not only or only == "google":
+        from .providers import build_providers
+        from .config import load as _load
+
+        fresh = _load()
+        creds = Path(fresh.google.credentials_file)
+        if not creds.exists():
+            print(f"  ! no client credentials at {creds}")
+            print("    create a Desktop-app OAuth client at "
+                  "https://console.cloud.google.com/apis/credentials")
+            print("    enable Gmail + Calendar APIs, download JSON, save it there.")
+            state["google"] = "missing-creds"
+        else:
+            p = build_providers(fresh).get("google")
+            if p and p.valid():
+                print(f"  google OK: already signed in as {p.address}")
+                state["google"] = "ok"
+            elif non_interactive:
+                print("  ! google token missing — run `mail-agent setup --step google` "
+                      "interactively once, or copy google-token.json up.")
+                state["google"] = "missing-token"
+            else:
+                ok = headless_google_auth(creds)
+                p2 = build_providers(_load()).get("google")
+                if ok and p2 and p2.valid():
+                    print(f"  google OK: signed in as {p2.address}")
+                    state["google"] = "ok"
+                else:
+                    print("  ! google sign-in did not complete")
+                    state["google"] = "failed"
+
+    # --- chat (optional, skipped by default with --yes) ---
+    if (not only or only == "chat") and not yes:
+        if _tty():
+            try:
+                ans = input("  Set up Telegram now? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
+            if ans.startswith("y"):
+                from .setup import step_telegram
+
+                step_telegram(state)
+        else:
+            state.setdefault("telegram", "skipped")
+    else:
+        state.setdefault("telegram", "skipped")
+
+    # --- voice ---
+    if (not only or only == "voice") and not getattr(args, "skip_voice", False):
+        if state.get("google") == "ok":
+            try:
+                from .setup import step_voice
+
+                step_voice(state)
+            except Exception as e:
+                print(f"  ! voice profile failed: {type(e).__name__}")
+                state["voice"] = "failed"
+        else:
+            state.setdefault("voice", "skipped-no-mailbox")
+
+    # --- service ---
+    if (not only or only == "start") and not getattr(args, "skip_service", False):
+        print("  service: on Daytona/container use `./start.sh bg` "
+              "(systemd user units are unavailable there).")
+        state.setdefault("service", "manual")
+
+    _save_state(state)
+    print("\n  setup state: " + ", ".join(f"{k}={v}" for k, v in sorted(state.items())))
+
+    # Honest exit code: 0 only if provider + google are OK.
+    if state.get("provider") == "ok" and state.get("google") == "ok":
+        print("\n  Mailbot is ready. Next: `mail-agent status`, `mail-agent cal`, `./start.sh bg`")
+        return 0
+    print("\n  Not ready yet — fix the ! lines above, then re-run `mail-agent setup`.")
+    return 1
+
+
+def cmd_doctor(args, cfg) -> int:
+    """Pre-flight checks with fix hints. Exit 0 iff usable."""
+    import sys as _sys
+
+    problems = 0
+
+    def check(name: str, ok: bool, hint: str = ""):
+        nonlocal problems
+        print(f"  {'✔' if ok else '✘'} {name}" + ("" if ok else f" — {hint}"))
+        if not ok:
+            problems += 1
+
+    check("python >= 3.11", _sys.version_info >= (3, 11),
+          f"found {_sys.version.split()[0]}")
+    s = read_secrets()
+    check("ROUTER_API_KEY set", bool(s.get("ROUTER_API_KEY")),
+          "export ROUTER_API_KEY=... ; mail-agent setup --import-env")
+    creds = Path(cfg.google.credentials_file)
+    check("google-credentials.json present", creds.exists(), f"missing {creds}")
+    try:
+        from .providers import build_providers
+
+        p = build_providers(cfg).get("google")
+        check("google token valid", bool(p and p.valid()),
+              "mail-agent setup --step google")
+        if p and p.valid():
+            try:
+                n = len(p.list_messages(folder="INBOX", limit=1))
+                check("gmail readable", True)
+            except Exception as e:
+                check("gmail readable", False, type(e).__name__)
+            if p.calendar_enabled:
+                try:
+                    p.list_events(limit=1)
+                    check("calendar reachable", True)
+                except Exception as e:
+                    check("calendar reachable", False, type(e).__name__)
+    except Exception as e:
+        check("google provider loads", False, f"{type(e).__name__}")
+    check("telegram configured",
+          bool(s.get("TELEGRAM_BOT_TOKEN") and s.get("TELEGRAM_CHAT_ID")),
+          "optional — mail-agent setup --step chat")
+    try:
+        from .storage import db
+
+        db.migrate()
+        check("database migrated", True)
+    except Exception as e:
+        check("database migrated", False, type(e).__name__)
+
+    cfg_problems = cfg.validate()
+    # validate() repeats router/google checks already shown; surface only extras.
+    extras = [x for x in cfg_problems
+              if "ROUTER_API_KEY" not in x and "google credentials" not in x]
+    for x in extras:
+        check(x, False, "see README / config")
+        problems += 1
+
+    print("\n  doctor: " + ("OK" if problems == 0 else f"{problems} problem(s)"))
+    return 0 if problems == 0 else 1

@@ -575,6 +575,24 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(fn=cmd_cal)
 
+    p = sub.add_parser("setup", help="guided setup: provider, google, chat (headless-friendly)")
+    p.add_argument("--yes", action="store_true", help="accept defaults, skip optional prompts")
+    p.add_argument("--non-interactive", action="store_true", help="never prompt; read from env")
+    p.add_argument("--import-env", action="store_true", help="copy known env vars into .secrets")
+    p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start")
+    p.add_argument("--skip-voice", action="store_true")
+    p.add_argument("--skip-service", action="store_true")
+    def _fn_setup(a, c):
+        from .wizard import cmd_setup
+        return cmd_setup(a, c)
+    p.set_defaults(fn=_fn_setup)
+
+    p = sub.add_parser("doctor", help="pre-flight checks with fix hints")
+    def _fn_doctor(a, c):
+        from .wizard import cmd_doctor
+        return cmd_doctor(a, c)
+    p.set_defaults(fn=_fn_doctor)
+
     args = ap.parse_args()
     logging_setup.setup(logging.DEBUG if args.verbose else logging.INFO)
 
