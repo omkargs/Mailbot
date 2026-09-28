@@ -3,7 +3,7 @@
 # Mailbot
 
 **The inbox colleague that tells you what it did — and what it refused to do.**
-Runs on your own machine. Answers to Telegram. Sleeps when you sleep.
+Runs on your own machine. Answers to Telegram. Works & manages your inbox while you sleep.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
