@@ -22,6 +22,7 @@ from ..config import Config
 from ..providers.base import Attachment, MailProvider
 from ..storage import db
 from . import guards
+from . import triage
 from .client import build_client, guarded_call, handle_refusal, usage_to_dict
 from .tools import TOOLS, ToolBox, build_system_prompt
 
@@ -93,6 +94,24 @@ def run_once(
         db.finish_run(run_id, status="ok")
         return {"status": "empty", "run_id": run_id}
 
+    # Cheap triage pass first: a small model sorts, IGNOREs get archived
+    # here, and the flagship only ever sees what matters. Any failure falls
+    # back to the full flagship pass — mail is never dropped to save money.
+    if triage.wanted(cfg):
+        try:
+            verdicts = triage.classify(pending[:12], cfg)
+            pending, _archived = triage.prune(pending, verdicts, cfg, provider, box)
+        except Exception as e:
+            log.warning("triage pass failed (%s); full flagship pass", type(e).__name__)
+    if not pending:
+        db.finish_run(run_id, triaged=box.stats["triaged"],
+                      input_tokens=0, output_tokens=0, status="ok")
+        return {"status": "ok", "run_id": run_id,
+                "summary": "Nothing needed doing — newsletters filed.",
+                "stats": box.stats,
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                          "cache_read": 0, "cache_write": 0}}
+
     system = _system_blocks(build_prompt(account, cfg))
 
     # Volatile context lives here, after the last cache breakpoint.
@@ -109,6 +128,8 @@ def run_once(
         ctx.append(guards.fence(
             f"from: {m['sender']}  date: {m.get('date', '')}\n"
             f"subject: {m.get('subject', '')[:120]}", "headers"))
+        if "_triage" in m:
+            ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
         if body:
             ctx.append(guards.fence(body[:1500], "body"))
         else:
