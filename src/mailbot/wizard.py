@@ -38,6 +38,7 @@ IMPORT_KEYS = (
     "ROUTER_BASE_URL",
     "ROUTER_API_KEY",
     "ROUTER_MODEL",
+    "ROUTER_TRIAGE_MODEL",
     "GOOGLE_CREDENTIALS",
     "GOOGLE_ACCOUNT",
     "GOOGLE_DISPLAY_NAME",
@@ -281,6 +282,28 @@ def cmd_setup(args, cfg) -> int:
             if res["ok"]:
                 print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
                 state["provider"] = "ok"
+                # Cheap triage model: the two-brain pass stays off unless this
+                # is set. Offer it interactively; agents pass it via env.
+                existing_tri = s.get("ROUTER_TRIAGE_MODEL", "")
+                if not non_interactive and not fast and _tty() and models:
+                    try:
+                        ans = input("  Cheap triage model id (blank = off, "
+                                    "triage runs on the main model): ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        ans = ""
+                    if ans and ans != model:
+                        if ans in models:
+                            write_secret("ROUTER_TRIAGE_MODEL", ans)
+                            print(f"  triage model: {ans}")
+                        else:
+                            tr = D.probe(base, key, ans)
+                            if tr["ok"]:
+                                write_secret("ROUTER_TRIAGE_MODEL", ans)
+                                print(f"  triage model: {ans}")
+                            else:
+                                print(f"  ! triage model rejected ({tr['error'][:100]}); leaving it off")
+                elif existing_tri:
+                    print(f"  triage model: {existing_tri}")
             else:
                 print(f"  ! provider FAILED: {res['error'][:160]}")
                 state["provider"] = "failed"

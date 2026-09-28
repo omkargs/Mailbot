@@ -15,6 +15,7 @@ Set up Mailbot from https://github.com/omkargs/Mailbot.git in ~/Mailbot:
    export ROUTER_API_KEY="<bynara/router key>"
    export ROUTER_BASE_URL="https://router.bynara.id"
    export ROUTER_MODEL="combo/claude2mail"
+   # Optional two-brain triage: export ROUTER_TRIAGE_MODEL="<cheap-model-id>"
    # Optional chat channel:
    # export TELEGRAM_BOT_TOKEN="<token>" TELEGRAM_CHAT_ID="<id>"
 

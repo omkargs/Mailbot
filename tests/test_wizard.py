@@ -130,3 +130,16 @@ def test_fast_skips_voice_service_chat(monkeypatch, tmp_path, capsys):
     assert state.get("provider") == "missing-key"
     assert "voice" not in state  # skipped, not failed
     assert "service" not in state
+
+
+def test_import_env_picks_up_triage_model(monkeypatch, tmp_path):
+    from mailbot import wizard as W
+    from mailbot import setup as S
+    from mailbot import config as C
+
+    monkeypatch.setattr(C, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(S, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(W, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("ROUTER_TRIAGE_MODEL", "cheap/triage-1")
+    assert "ROUTER_TRIAGE_MODEL" in W.import_env()
+    assert S.read_secrets()["ROUTER_TRIAGE_MODEL"] == "cheap/triage-1"

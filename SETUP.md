@@ -51,6 +51,8 @@ Set up Mailbot from https://github.com/omkargs/Mailbot.git in ~/Mailbot:
    export ROUTER_API_KEY="<bynara/router key>"
    export ROUTER_BASE_URL="https://router.bynara.id"
    export ROUTER_MODEL="combo/claude2mail"
+   # Optional two-brain triage (cheap model sorts, flagship only thinks):
+   # export ROUTER_TRIAGE_MODEL="<cheap-model-id>"
    # Optional: export TELEGRAM_BOT_TOKEN="<t>" TELEGRAM_CHAT_ID="<id>"
 
 3. Headless wizard (no prompts, reads env):
@@ -84,7 +86,8 @@ lines, and the PR URL. Never print secret values.
 ```
 
 Env vars the wizard imports (`--import-env`): `ROUTER_BASE_URL`,
-`ROUTER_API_KEY`, `ROUTER_MODEL`, `GOOGLE_CREDENTIALS` (path or raw JSON),
+`ROUTER_API_KEY`, `ROUTER_MODEL`, `ROUTER_TRIAGE_MODEL` (optional — enables
+the cheap triage pass; blank means off), `GOOGLE_CREDENTIALS` (path or raw JSON),
 `GOOGLE_ACCOUNT`, `GOOGLE_DISPLAY_NAME`, `GOOGLE_CALENDAR_ENABLED`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISCORD_BOT_TOKEN`,
 `DISCORD_USER_ID`, `AGENT_SEND_MODE`, `AGENT_SCAN_INTERVAL`,
