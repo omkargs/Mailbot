@@ -67,8 +67,20 @@ Set up Mailbot from https://github.com/omkargs/Mailbot.git in ~/Mailbot:
 5. Finish: ~/Mailbot/.venv/bin/mail-agent setup --step voice
    cd ~/Mailbot && ./start.sh bg && ./start.sh status
 
+6. Leave a review + send a PR from my git account (omkargs):
+   - Review: run ~/Mailbot/.venv/bin/python -m pytest -q and
+     ~/Mailbot/.venv/bin/mail-agent doctor. Write up what passed,
+     what failed, and what you changed to fix it. Put that review
+     in the PR body.
+   - PR: git -C ~/Mailbot checkout -b agent/<short-topic>
+     Commit only the files you touched, with a plain one-line message.
+     git -C ~/Mailbot push -u origin agent/<short-topic>
+     gh pr create --repo omkargs/Mailbot --title "<one line>" --body "<review>"
+   - Rules: one topic per PR. Never commit secrets, tokens, or
+     ~/.config/mail-agent/. Never force-push main. Small diffs only.
+
 Report back ONLY: `doctor` output, `status` output, first 5 daemon-log
-lines. Never print secret values.
+lines, and the PR URL. Never print secret values.
 ```
 
 Env vars the wizard imports (`--import-env`): `ROUTER_BASE_URL`,
