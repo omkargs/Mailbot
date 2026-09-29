@@ -681,6 +681,27 @@ def cmd_setup(args, cfg) -> int:
 
     # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
     # add-inbox is standalone: a full run never invents inboxes.
+    if getattr(args, "print_auth_url", False):
+        # One string and out. Headless users otherwise run a whole wizard
+        # to obtain a URL, then write a script to produce it.
+        from .config import load as _load_url
+        creds_file = Path(_load_url().google.credentials_file)
+        pid = (getattr(args, "for_profile", "") or "").strip()
+        if pid:
+            from . import profiles as _pr
+            creds_file = _pr.creds_file(pid)
+        if not creds_file.exists():
+            print(f"  no credentials file at {creds_file}")
+            print("  Finish the Google console steps first, or paste the JSON:")
+            print("    mail-agent setup --step google")
+            return 1
+        try:
+            print(_portable(creds_file))
+        except Exception as e:
+            print(f"  could not build the URL: {e}")
+            return 1
+        return 0
+
     if only == "add-inbox":
         return _step_add_inbox(state)
     plan = []
@@ -932,23 +953,6 @@ def cmd_setup(args, cfg) -> int:
             state["provider"] = "missing-key"
 
     # --- google ---
-    if getattr(args, "print_auth_url", False):
-        # One string and out. Headless users otherwise run a whole wizard
-        # to obtain a URL, then write a script to produce it.
-        from .config import load as _load_url
-        creds_file = Path(_load_url().google.credentials_file)
-        if not creds_file.exists():
-            print(f"  no credentials file at {creds_file}")
-            print("  Finish the Google console steps first, or paste the JSON:")
-            print("    mail-agent setup --step google")
-            return 1
-        try:
-            print(_portable(creds_file))
-        except Exception as e:
-            print(f"  could not build the URL: {e}")
-            return 1
-        return 0
-
     if not only or only == "google":
         idx += 1
         _hdr(idx, "google (Gmail + Calendar)")
@@ -1158,11 +1162,45 @@ def _step_add_inbox(state: dict) -> int:
         print(f"  ! {e}")
         return 1
     creds = _profiles.creds_file(pid)
-    print(f"\n  Step 1/2 — OAuth client JSON for {name}:")
-    print("    Same 5-minute Cloud Console flow (its own OAuth client), then")
-    if not collect_credentials_json(creds):
-        print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
-        return 1
+    primary = Path(_load().google.credentials_file)
+    if not creds.exists() and primary.exists():
+        # A Google Desktop client identifies the *app*, not the user. One
+        # client can serve any number of accounts — you just sign in as
+        # whoever you want at the consent screen, and the token comes back
+        # for that account. Sending someone back through the Cloud Console
+        # to build a second identical client costs five minutes and gains
+        # nothing.
+        print(f"\n  Step 1/2 — OAuth client for {name}:")
+        ans = ""
+        try:
+            ans = input(f"  Reuse the one already on this box? [{primary.name}] [Y/n]: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        ans = ans.strip().lower()
+        if ans in ("", "y", "yes"):
+            try:
+                creds.parent.mkdir(parents=True, exist_ok=True)
+                creds.write_text(primary.read_text())
+                creds.chmod(0o600)
+            except OSError as e:
+                print(f"  ! could not copy {primary}: {e}")
+                return 1
+            print(f"  reusing {primary}")
+            print("  One Desktop client works for any number of accounts. You")
+            print("  just sign in as the new one when the consent page opens.")
+        else:
+            print("    Paste a NEW OAuth client JSON below, then a blank line.")
+            if not collect_credentials_json(creds):
+                print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
+                return 1
+    else:
+        print(f"\n  Step 1/2 — OAuth client JSON for {name}:")
+        print("    Cloud Console → Credentials → OAuth client ID → Desktop app →")
+        print("    download the JSON, then paste it below.")
+        if not collect_credentials_json(creds):
+            print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
+            return 1
     print(f"\n  Step 2/2 — sign in {name}:")
     token = _profiles.token_file(pid)
     if not headless_google_auth(creds, out_token=token):

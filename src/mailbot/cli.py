@@ -746,6 +746,8 @@ def main() -> int:
     p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start|verify")
     p.add_argument("--print-auth-url", action="store_true",
                    help="print the Google consent URL and exit (headless boxes)")
+    p.add_argument("--for-profile", default="",
+                   help="use this profile's OAuth client with --print-auth-url")
     p.add_argument("--skip-voice", action="store_true")
     p.add_argument("--skip-service", action="store_true")
     def _fn_setup(a, c):
