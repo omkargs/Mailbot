@@ -264,7 +264,13 @@ def upsert_account(
             """INSERT INTO accounts (id, address, display_name, auto_send, calendar, enabled, updated_at)
                VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
-                 address=excluded.address, display_name=excluded.display_name,
+                 -- Never blank a known address with an empty one. Every CLI
+                 -- command re-registers its providers, and a provider that
+                 -- has not resolved its address yet (no network, token not
+                 -- yet refreshed) would otherwise wipe the row. Then the
+                 -- account is left nameless in every chat header forever.
+                 address=COALESCE(NULLIF(excluded.address,''), accounts.address),
+                 display_name=COALESCE(NULLIF(excluded.display_name,''), accounts.display_name),
                  auto_send=excluded.auto_send, calendar=excluded.calendar,
                  enabled=excluded.enabled, updated_at=excluded.updated_at""",
             (id, address, display_name, int(auto_send), int(calendar), int(enabled), now()),

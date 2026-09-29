@@ -81,10 +81,19 @@ def _batch_fetch(svc, ids: list[str], fmt: str = "full") -> list[dict[str, Any]]
 
 
 class GmailProvider(MailProvider):
+    # A default only. This MUST be an instance attribute for every extra
+    # inbox: `account` is the primary key on messages, cursors, runs,
+    # approvals and usage, and the per-inbox voice profile. As a class
+    # attribute every extra inbox silently shared the primary's key - so a
+    # second inbox read the first inbox's cursor, stored its mail under the
+    # same account, and shared a voice profile. That is precisely the
+    # isolation add-inbox exists to provide.
     account = "google"
 
     def __init__(self, credentials_file: str, token_file: str, address: str = "",
-                 display_name: str = "", auto_send: bool = False, calendar_enabled: bool = True):
+                 display_name: str = "", auto_send: bool = False, calendar_enabled: bool = True,
+                 account: str = "google"):
+        self.account = account
         self.credentials_file = credentials_file
         self.token_file = token_file
         self.address = address
@@ -93,6 +102,22 @@ class GmailProvider(MailProvider):
         self.calendar_enabled = calendar_enabled
         self._gmail = None
         self._calendar = None
+
+    def resolve_address(self) -> str:
+        """Which account is this token actually for?
+
+        The token is the only authority on that, and config can be empty or
+        stale. Without this, a second inbox has no address at all and every
+        chat header reads back blank or as a raw account id.
+        """
+        if self.address:
+            return self.address
+        try:
+            me = self._service().users().getProfile(userId="me").execute()
+            self.address = me.get("emailAddress", "") or ""
+        except Exception as e:
+            log.debug("address resolve failed (%s)", type(e).__name__)
+        return self.address
 
     # ---------------------------------------------------------------- auth
     def _creds(self):

@@ -47,13 +47,29 @@ def build_providers(cfg: config.Config | None = None) -> dict[str, MailProvider]
                 continue
             from .gmail import GmailProvider as _GP
 
+            # The address lives in the accounts table, set at sign-in time.
+            # Without it every chat header and every "who is this" reads
+            # back blank or as the raw account id.
+            addr = ""
+            try:
+                from ..storage import db as _db
+
+                _db.ensure_migrated()
+                with _db.db() as _c:
+                    _r = _c.execute("SELECT address FROM accounts WHERE id=?",
+                                    (acct,)).fetchone()
+                addr = (_r["address"] if _r else "") or ""
+            except Exception as _e:
+                log.debug("address lookup failed for %s: %s", acct, type(_e).__name__)
+
             out[acct] = _GP(
                 credentials_file=str(creds),
                 token_file=str(_profiles.token_file(prof["id"])),
-                address="",
+                address=addr,
                 display_name=prof.get("name", ""),
                 auto_send=cfg.google.auto_send,
                 calendar_enabled=cfg.google.calendar_enabled,
+                account=acct,
             )
     except Exception as e:
         log.warning("extra inbox profiles skipped: %s", type(e).__name__)

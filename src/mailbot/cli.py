@@ -36,9 +36,25 @@ def _providers(cfg):
     out = {}
     for name, p in build_providers(cfg).items():
         if p.valid():
+            # Ask the provider which account it is before recording it, so
+            # a second inbox is stored under its real address rather than
+            # an empty string.
+            try:
+                p.resolve_address()
+            except Exception:
+                pass
             out[name] = p
+            # A NEW inbox starts with auto-send OFF. It must not inherit the
+            # global setting, and an existing inbox's own setting must not
+            # be clobbered either: this runs on every single command, so
+            # writing the global value here meant a per-inbox decision could
+            # never stick, and a freshly added mailbox was trusted to send
+            # before anyone approved a single contact.
+            existing = db.get_account(name)
+            auto = False if existing is None else bool(existing.get("auto_send"))
+            cal = p.calendar_enabled if existing is None else bool(existing.get("calendar"))
             db.upsert_account(name, p.address, p.display_name,
-                              auto_send=p.auto_send, calendar=p.calendar_enabled)
+                              auto_send=auto, calendar=cal)
         else:
             log.warning("account %s has no valid session; skipping (run `mail-agent auth`)", name)
     return out

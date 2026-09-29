@@ -34,7 +34,9 @@ class GraphProvider(MailProvider):
 
     def __init__(self, tenant_id: str, client_id: str, client_secret: str,
                  address: str = "", display_name: str = "", auto_send: bool = False,
-                 calendar_enabled: bool = True, token_file: str = ""):
+                 calendar_enabled: bool = True, token_file: str = "",
+                 account: str = "microsoft"):
+        self.account = account
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
