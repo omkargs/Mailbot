@@ -11,6 +11,65 @@ CONFIG_DIR="${MAIL_AGENT_CONFIG_DIR:-$HOME/.config/mail-agent}"
 SECRETS="$CONFIG_DIR/.secrets"
 CONFIG="$CONFIG_DIR/config.json"
 VENV="$REPO/.venv"
+INSTALL_LOG="$CONFIG_DIR/logs/install.log"
+
+# Stage protocol: --manifest prints the stages as JSON, --stage NAME runs
+# one, --non-interactive skips input. Fresh install and re-run land in the
+# same state — every stage is idempotent.
+STAGE=""
+WANT_MANIFEST=false
+NON_INTERACTIVE=false
+VERBOSE=false
+DO_REINSTALL=false
+WIZ_ARGS=()
+
+usage() {
+  cat <<EOF
+Usage: ./setup.sh [--fast] [--reinstall] [--non-interactive] [--verbose]
+                  [--stage NAME] [--manifest] [wizard flags]
+
+  Stages: python, install, setup, complete
+    ./setup.sh --manifest        print the stage list as JSON
+    ./setup.sh --stage install   run one stage only
+    ./setup.sh --fast            full run, defaults, no optional prompts
+    ./setup.sh --reinstall       force a fresh venv + reinstall
+    ./setup.sh --non-interactive never prompt (reads env, like CI)
+
+  Everything else is passed to the wizard (see SETUP.md).
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --manifest) WANT_MANIFEST=true; shift ;;
+    --stage)
+      [ $# -lt 2 ] && { echo "--stage needs a value" >&2; exit 2; }
+      STAGE="$2"; shift 2 ;;
+    --non-interactive) NON_INTERACTIVE=true; WIZ_ARGS+=(--non-interactive); shift ;;
+    --verbose) VERBOSE=true; shift ;;
+    --reinstall) DO_REINSTALL=true; shift ;;
+    *) WIZ_ARGS+=("$1"); shift ;;
+  esac
+done
+
+emit_manifest() {
+  printf '{"stages":['
+  printf '{"name":"python","title":"Find Python 3.11+","needs_user_input":false},'
+  printf '{"name":"install","title":"Create venv, install package","needs_user_input":false},'
+  printf '{"name":"setup","title":"Provider, Google, chat, voice","needs_user_input":true},'
+  printf '{"name":"complete","title":"Verify and show next steps","needs_user_input":false}'
+  printf ']}\n'
+}
+
+if [ "$WANT_MANIFEST" = true ]; then
+  emit_manifest
+  exit 0
+fi
+
+mkdir -p "$(dirname "$INSTALL_LOG")"
+exec 3>>"$INSTALL_LOG"
+_log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3; }
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
   BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
@@ -18,9 +77,9 @@ else
   BOLD=''; DIM=''; GRN=''; YLW=''; RST=''
 fi
 
-say()  { printf '%s\n' "$*"; }
-ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; }
-warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; }
+say()  { printf '%s\n' "$*"; _log "say: $*" 2>/dev/null || true; }
+ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; _log "ok: $*" 2>/dev/null || true; }
+warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; _log "warn: $*" 2>/dev/null || true; }
 die()  { printf '%s✘ %s%s\n' "$RST" "$*" "$RST"; exit 1; }
 
 # Pick a Python >= 3.11, self-healing. Tries, in order:
@@ -72,10 +131,15 @@ make_venv() {
 
 pip_install() {
   # $1 = venv dir, rest = pip args. Prefers uv, falls back to venv pip.
+  # --verbose streams; otherwise quiet (the wizard says how long it takes).
+  local _q="-q"
+  [ "${VERBOSE:-false}" = true ] && _q=""
   if command -v uv >/dev/null 2>&1; then
-    VIRTUAL_ENV="$1" uv pip install "${@:2}" -q 2>/dev/null && return 0
+    # shellcheck disable=SC2086
+    VIRTUAL_ENV="$1" uv pip install "${@:2}" $_q 2>/dev/null && return 0
   fi
-  "$1/bin/pip" install "${@:2}" -q
+  # shellcheck disable=SC2086
+  "$1/bin/pip" install "${@:2}" $_q
 }
 
 PY=""
@@ -93,9 +157,9 @@ fi
 [ "$PY" = "uv" ] && say "${DIM}Using uv-managed Python (>=3.11, auto-fetched)${RST}" \
   || say "${DIM}Using $PY ($("$PY" --version 2>&1))${RST}"
 
-# Opensource splash: a 5-second hello, skippable with any key. Never shows
-# when output is piped, when stdin is not a TTY, in fast/CI runs, or when
-# MAIL_AGENT_NO_SPLASH is set — branding must never slow automation.
+# Boxed banner: the 5-second hello. Skippable with any key. Never shows
+# when output is piped, stdin is not a TTY, in fast/CI runs, or with
+# MAIL_AGENT_NO_SPLASH — branding must never slow automation.
 splash() {
   case " $* " in
     *" --fast "*|*" --yes "*|*" --non-interactive "*|*" --import-env "*|*" --dry-run "*|*" --step "*|*" --help "*|*" -h "*)
@@ -103,19 +167,20 @@ splash() {
   esac
   [ -t 0 ] || return 0
   [ -n "${MAIL_AGENT_NO_SPLASH:-}" ] && return 0
-  cat <<LOGO
-  ${BOLD} __  __       _  _  _                _
-  |  \/  |  __ _ (_)| |  ___   ___  | |_
-  | |\/| | / _\` || || | / _ \\ / _ \\ | __|
-  | |  | || (_| || || || (_) || (_) || |_
-  |_|  |_| \\__,_||_||_| \\___/  \\___/  \\__|
-  ${RST}  the inbox colleague that acts — MIT licensed, yours to keep
-  ${DIM}showing off for 5s — press any key to skip${RST}
-LOGO
+  printf '\n%s\n' "${BOLD}┌──────────────────────────────────────────────────┐"
+  printf '%s\n' "│              __  __       _  _  _                 │"
+  printf '%s\n' "│             |  \/  |  __ _ (_)| |  ___ ___        │"
+  printf '%s\n' "│             | |\/| | / _\` || || | / _ / _ \       │"
+  printf '%s\n' "│             | |  | || (_| || || || (_) (_) |      │"
+  printf '%s\n' "│             |_|  |_| \__,_||_||_| \___/ \___/      │"
+  printf '%s\n' "├──────────────────────────────────────────────────┤"
+  printf '%s\n' "│  The inbox colleague that acts. MIT, yours.     │"
+  printf '%s%s\n' "└──────────────────────────────────────────────────┘" "$RST"
+  printf '%s\n' "${DIM}showing off for 5s — press any key to skip${RST}"
   read -t 5 -n 1 -s -r _splash_key 2>/dev/null || true
   printf '\n'
 }
-splash "$@"
+splash "${WIZ_ARGS[@]}"
 hdr()  { printf '\n%s▸ %s%s\n\n' "$BOLD" "$*" "$RST"; }
 
 # Secret input: visible=false, no default echo, no history.
@@ -207,30 +272,39 @@ say "${DIM}$REPO${RST}"
 # (headless-friendly, --non-interactive, resumable). Falls through to the
 # legacy flow below only if the CLI is unavailable.
 if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
-  if [ ! -d "$VENV" ]; then
-    make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
+  if [ -z "$STAGE" ] || [ "$STAGE" = "install" ]; then
+    if [ ! -d "$VENV" ]; then
+      make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
+    fi
+    # Re-runs are instant: a working venv is reused. Pass --reinstall to force.
+    if [ "$DO_REINSTALL" = true ] || ! "$VENV/bin/python" -c "import mailbot" >/dev/null 2>&1; then
+      say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
+      pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
+    else
+      say "${DIM}Reusing the existing install (pass --reinstall to force)…${RST}"
+    fi
   fi
-  # Re-runs are instant: a working venv is reused. Pass --reinstall to force.
-  _fresh=0
-  case " $* " in
-    *" --reinstall "*) _fresh=1 ;;
+  case "$STAGE" in
+    ""|"setup")
+      if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
+        exec "$VENV/bin/mail-agent" setup "${WIZ_ARGS[@]}"
+      fi
+      warn "new wizard unavailable, falling back to legacy prompts"
+      ;;
+    "python")
+      [ "$PY" = "uv" ] && say "Python: uv-managed (>=3.11)" || say "Python: $("$PY" --version 2>&1)"
+      exit 0
+      ;;
+    "install")
+      say "${GRN}✔ install stage done${RST}"
+      exit 0
+      ;;
+    "complete")
+      "$VENV/bin/mail-agent" doctor
+      exit "$?"
+      ;;
+    *) die "unknown stage: $STAGE (see --manifest)" ;;
   esac
-  if [ "$_fresh" -eq 1 ] || ! "$VENV/bin/python" -c "import mailbot" >/dev/null 2>&1; then
-    say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
-    pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
-  else
-    say "${DIM}Reusing the existing install (pass --reinstall to force)…${RST}"
-  fi
-  if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
-    # --reinstall is a setup.sh-only flag; the wizard must not see it.
-    _args=()
-    for _a in "$@"; do
-      [ "$_a" = "--reinstall" ] && continue
-      _args+=("$_a")
-    done
-    exec "$VENV/bin/mail-agent" setup "${_args[@]}"
-  fi
-  warn "new wizard unavailable, falling back to legacy prompts"
 fi
 
 # ---------------------------------------------------------------- python (legacy)

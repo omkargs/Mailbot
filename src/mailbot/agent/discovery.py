@@ -107,6 +107,54 @@ def rank(models: list[str]) -> list[str]:
     return known + rest
 
 
+def list_pricing(base_url: str, api_key: str) -> dict[str, tuple[float, float]]:
+    """Best-effort $/Mtok (input, output) per model id. {} when unknown.
+
+    Speaks the OpenRouter shape (data[].pricing.{prompt,completion}).
+    Providers without pricing (Anthropic's own /models) yield nothing —
+    the picker simply shows no prices rather than wrong ones.
+    """
+    base = normalise_base(base_url)
+    if not base or not api_key:
+        return {}
+    for path in ("/models", "/v1/models"):
+        url = base + path
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {api_key}",
+            "x-api-key": api_key,
+            "Accept": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                data = json.loads(r.read().decode())
+        except Exception as e:
+            log.debug("pricing %s -> %s", path, type(e).__name__)
+            continue
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            continue
+        out: dict[str, tuple[float, float]] = {}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            mid = it.get("id") or it.get("name")
+            pr = it.get("pricing") or {}
+            try:
+                pin = float(pr.get("prompt", 0)) * 1_000_000
+                pout = float(pr.get("completion", 0)) * 1_000_000
+            except (TypeError, ValueError):
+                continue
+            if mid and (pin or pout):
+                out[str(mid)] = (pin, pout)
+        if out:
+            return out
+    return {}
+
+
+def fmt_price(pin: float, pout: float) -> str:
+    return f"${pin:.2f}/${pout:.2f}/M"
+
+
 def probe(base_url: str, api_key: str, model: str, timeout: float = 30.0) -> dict[str, Any]:
     """Check a base/key/model actually works, before it is written to config.
 

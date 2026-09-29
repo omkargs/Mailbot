@@ -279,3 +279,35 @@ def test_missing_key_says_what_and_where(monkeypatch, tmp_path, capsys):
     assert "password your AI provider" in out
     assert "export ROUTER_API_KEY=" in out
     assert "Next:" in out
+
+
+def test_labelled_maps_back_to_ids():
+    from mailbot import wizard as W
+
+    labels, back = W._labelled(["aaa-model", "cheap/x"],
+                               {"cheap/x": (0.15, 0.47)})
+    assert labels[0] == "aaa-model"
+    assert labels[1] == "cheap/x  ($0.15/$0.47/M)"
+    assert back[labels[1]] == "cheap/x"
+
+
+def test_list_pricing_parses_openrouter_shape(monkeypatch):
+    import io
+    import json as _json
+    import urllib.request
+    from mailbot.agent import discovery as D
+
+    payload = _json.dumps({"data": [
+        {"id": "cheap/x", "pricing": {"prompt": "0.00000015", "completion": "0.00000047"}},
+        {"id": "no-price", "pricing": {}},
+    ]}).encode()
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return payload
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    out = D.list_pricing("https://openrouter.ai/api/anthropic", "k")
+    assert out["cheap/x"] == (0.15, 0.47)
+    assert "no-price" not in out

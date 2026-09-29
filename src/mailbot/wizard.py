@@ -353,6 +353,103 @@ def _run_voice(state: dict) -> None:
         state.setdefault("voice", "skipped-no-mailbox")
 
 
+def _labelled(ids: list[str], prices: dict[str, tuple[float, float]]) -> tuple[list[str], dict[str, str]]:
+    """Picker labels with prices when known. Returns (labels, label->id)."""
+    from .agent.discovery import fmt_price
+
+    labels, back = [], {}
+    for m in ids:
+        p = prices.get(m)
+        label = f"{m}  ({fmt_price(*p)})" if p else m
+        labels.append(label)
+        back[label] = m
+    return labels, back
+
+
+def _step_discord(state: dict) -> None:
+    """Discord: bot token + your user id. Notify-only."""
+    import getpass
+
+    s = read_secrets()
+    if s.get("DISCORD_BOT_TOKEN") and s.get("DISCORD_USER_ID"):
+        print("  discord already configured — keeping it")
+        state["discord"] = "ok"
+        return
+    print("  Create an app at https://discord.com/developers/applications")
+    print("  Bot → enable MESSAGE CONTENT INTENT, invite with 'bot' scope.")
+    try:
+        tok = getpass.getpass("  Bot token (hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        tok = ""
+        print()
+    if not tok:
+        print("  ! no token — discord skipped")
+        state["discord"] = "skipped"
+        return
+    write_secret("DISCORD_BOT_TOKEN", tok)
+    try:
+        uid = input("  Your Discord user ID (for DMs): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        uid = ""
+        print()
+    if uid:
+        write_secret("DISCORD_USER_ID", uid)
+    if _test_notify("discord"):
+        state["discord"] = "ok"
+    else:
+        state["discord"] = "partial (token saved, delivery failed)"
+
+
+def _step_slack(state: dict) -> None:
+    """Slack: bot token + channel id. Notify-only."""
+    import getpass
+
+    s = read_secrets()
+    if s.get("SLACK_BOT_TOKEN") and s.get("SLACK_CHANNEL"):
+        print("  slack already configured — keeping it")
+        state["slack"] = "ok"
+        return
+    print("  Create an app at https://api.slack.com/apps → Bot token.")
+    try:
+        tok = getpass.getpass("  Bot token, xoxb-… (hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        tok = ""
+        print()
+    if not tok:
+        print("  ! no token — slack skipped")
+        state["slack"] = "skipped"
+        return
+    write_secret("SLACK_BOT_TOKEN", tok)
+    try:
+        chan = input("  Channel ID (e.g. C012345): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        chan = ""
+        print()
+    if chan:
+        write_secret("SLACK_CHANNEL", chan)
+    if _test_notify("slack"):
+        state["slack"] = "ok"
+    else:
+        state["slack"] = "partial (token saved, delivery failed)"
+
+
+def _test_notify(which: str) -> bool:
+    """One honest delivery test. Returns True iff the message landed."""
+    from .config import load as _load
+    from .notify.channels import build_notifiers
+
+    try:
+        n = build_notifiers(_load())
+        if n.send("Mailbot connected — setup test, ignore this."):
+            print(f"  {which} test message delivered")
+            return True
+    except Exception as e:
+        print(f"  {which} test failed: {type(e).__name__}")
+        return False
+    print(f"  {which} test message did not deliver — check token/target")
+    return False
+
+
 def cmd_setup(args, cfg) -> int:
     import time as _time
 
@@ -466,9 +563,12 @@ def cmd_setup(args, cfg) -> int:
                 elif _tty():
                     # Arrow-key model picker. No guessing model ids.
                     # Manual entry covers endpoints with no /models page.
+                    # Prices shown when the endpoint reports them (OpenRouter).
                     MANUAL = "Type it manually…"
-                    pick = _choose("Pick the brain (best first):",
-                                   ranked[:12] + [MANUAL], default=ranked[0])
+                    prices = D.list_pricing(base, key)
+                    labels, back = _labelled(ranked[:12], prices)
+                    pick = _choose("Pick the brain (best first, $in/$out per Mtok):",
+                                   labels + [MANUAL], default=labels[0])
                     if pick == MANUAL:
                         try:
                             typed = input("  Model id: ").strip()
@@ -481,7 +581,7 @@ def cmd_setup(args, cfg) -> int:
                             else:
                                 print(f"  ! that id failed ({chk['error'][:100]}); keeping {model}")
                     elif pick:
-                        model = pick
+                        model = back.get(pick, pick)
                 write_secret("ROUTER_MODEL", model)
             elif not models and not non_interactive and not fast and _tty():
                 # Endpoint lists nothing (or unreachable for listing) — let
@@ -503,16 +603,21 @@ def cmd_setup(args, cfg) -> int:
                 existing_tri = s.get("ROUTER_TRIAGE_MODEL", "")
                 if not non_interactive and not fast and _tty() and models:
                     MANUAL = "Type it manually…"
-                    opts = ["Off — main model does triage"] + \
-                        [m for m in D.rank(models) if m != model][:8] + [MANUAL]
+                    tri_ids = [m for m in D.rank(models) if m != model][:8]
+                    prices = D.list_pricing(base, key)
+                    tlabels, tback = _labelled(tri_ids, prices)
+                    OFF = "Off — main model does triage"
+                    opts = [OFF] + tlabels + [MANUAL]
                     ans = _choose("Cheap triage model (sorts mail, flagship only thinks):",
                                   opts, default=opts[0])
                     if ans == MANUAL:
                         try:
-                            ans = input("  Triage model id: ").strip() or "Off — main model does triage"
+                            ans = input("  Triage model id: ").strip() or OFF
                         except (EOFError, KeyboardInterrupt):
-                            ans = "Off — main model does triage"
-                    if ans and not ans.startswith("Off"):
+                            ans = OFF
+                    elif ans and ans != OFF:
+                        ans = tback.get(ans, ans)
+                    if ans and ans != OFF:
                         if ans in models:
                             write_secret("ROUTER_TRIAGE_MODEL", ans)
                             print(f"  triage model: {ans}")
@@ -593,22 +698,45 @@ def cmd_setup(args, cfg) -> int:
         if _tty():
             from .menu import multi as _multi
 
-            # Space to select, Enter when done. Telegram is the only fully
-            # interactive channel today; Discord/Slack take tokens via env
-            # (see SETUP.md) until their menu steps land.
-            picked = _multi("Talk to the bot where? (space = select)",
-                            ["Telegram — chat + approvals",
-                             "Skip for now"])
+            # Space to select, Enter when done. Telegram is fully
+            # interactive (chat + approvals); Discord/Slack are
+            # notify-only (no button polling — approve on Telegram).
+            s = read_secrets()
+            def _mark(label, *keys):
+                return (label + " (configured)"
+                        if all(s.get(k) for k in keys) else label)
+            opts = [
+                _mark("Telegram — chat + approvals",
+                      "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"),
+                _mark("Discord — notifications only",
+                      "DISCORD_BOT_TOKEN", "DISCORD_USER_ID"),
+                _mark("Slack — notifications only",
+                      "SLACK_BOT_TOKEN", "SLACK_CHANNEL"),
+                "Skip for now",
+            ]
+            picked = _multi("Talk to the bot where? (space = select)", opts)
             if any(p.startswith("Telegram") for p in picked):
                 from .setup import step_telegram
 
                 step_telegram(state)
             else:
                 state.setdefault("telegram", "skipped")
+            if any(p.startswith("Discord") for p in picked):
+                _step_discord(state)
+            else:
+                state.setdefault("discord", "skipped")
+            if any(p.startswith("Slack") for p in picked):
+                _step_slack(state)
+            else:
+                state.setdefault("slack", "skipped")
         else:
             state.setdefault("telegram", "skipped")
+            state.setdefault("discord", "skipped")
+            state.setdefault("slack", "skipped")
     else:
         state.setdefault("telegram", "skipped")
+        state.setdefault("discord", "skipped")
+        state.setdefault("slack", "skipped")
 
     # --- voice (slow: reads sent mail; skipped by --fast) ---
     if (not only or only == "voice") and not skip_voice:
@@ -642,6 +770,7 @@ def cmd_setup(args, cfg) -> int:
         print(f"  finished in {dt:.0f}s")
 
     # Honest exit code: 0 only if provider + google are OK.
+    _print_availability(state, cfg)
     if state.get("provider") == "ok" and state.get("google") == "ok":
         print("\n  Mailbot is ready. Next: `mail-agent status`, `mail-agent cal`, `./start.sh bg`")
         return 0
@@ -653,6 +782,42 @@ def cmd_setup(args, cfg) -> int:
     else:
         print("\n  Next: re-run `mail-agent setup` — something above still needs you.")
     return 1
+
+
+def _print_availability(state: dict, cfg) -> None:
+    """What works, what's missing, where the files live. One screen."""
+    from . import profiles as _profiles
+
+    s = read_secrets()
+    if state.get("provider") == "ok":
+        prov = f"OK ({s.get('ROUTER_MODEL', '?')})"
+    else:
+        prov = "missing — need API key"
+    tri = s.get("ROUTER_TRIAGE_MODEL", "")
+    tri = f"two-brain ({tri})" if tri else "off (flagship does triage)"
+    if state.get("google") == "ok":
+        box = "OK"
+    else:
+        box = "missing — need OAuth"
+    chats = [k for k, v in
+             (("Telegram", state.get("telegram")), ("Discord", state.get("discord")),
+              ("Slack", state.get("slack"))) if v == "ok"]
+    chat = ", ".join(chats) if chats else "skipped (optional)"
+    voice = {"ok": "learned"}.get(state.get("voice", ""), state.get("voice", "skipped"))
+    cur = None
+    try:
+        cur = _profiles.get_current()
+    except Exception:
+        pass
+    prof = f"{cur['name']} ({cur['account']})" if cur else "personal"
+    print("\n  What works:")
+    print(f"    brain ..... {prov}")
+    print(f"    triage .... {tri}")
+    print(f"    mailbox ... {box}")
+    print(f"    chat ...... {chat}")
+    print(f"    voice ..... {voice}")
+    print(f"    profile ... {prof}")
+    print(f"  Files: {config_dir()}/config.json, .secrets (600), google-token.json")
 
 
 def _step_add_inbox(state: dict) -> int:
