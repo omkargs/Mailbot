@@ -1223,6 +1223,26 @@ def cmd_doctor(args, cfg) -> int:
 
         db.migrate()
         check("database migrated", True)
+
+        # Mail the agent believes it has passed but has not. The cursor
+        # used to jump to the newest message in the account rather than
+        # the newest this run handled, so a crashed run could orphan mail
+        # permanently with no symptom at all. Self-detecting the bug
+        # class beats a user filing it.
+        with db.db() as c:
+            orphans = c.execute("""
+                SELECT COUNT(*) AS n
+                  FROM messages m JOIN cursors cu
+                    ON cu.account = m.account AND cu.stream = 'inbox'
+                 WHERE m.processed_at IS NULL
+                   AND m.id = cu.last_id
+            """).fetchone()["n"]
+        if orphans:
+            print(f"  · {orphans} message(s) sit at the cursor unprocessed.")
+            print("    Nothing is lost — they are still in Gmail. To re-queue them:")
+            print("      mail-agent requeue-unprocessed")
+        else:
+            check("no orphaned mail at the cursor", True)
     except Exception as e:
         check("database migrated", False, type(e).__name__)
 

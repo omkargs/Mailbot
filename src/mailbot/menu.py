@@ -215,6 +215,84 @@ def _visual_height(frame: str, width: int) -> int:
     return h
 
 
+def _set_keyboard_raw(fd: int) -> None:
+    """Unbuffered keystrokes, but keep output post-processing.
+
+    tty.setraw() also clears OPOST|ONLCR, which turns every "\n" we print
+    into a bare line feed that does not return the carriage. Frames then
+    draw as a staircase, each line indented by the length of the one
+    above. setcbreak() clears only ICANON and ECHO - all the keyboard
+    needs - and leaves the output side alone.
+    """
+    import termios as _t
+    import tty as _tty
+
+    _tty.setcbreak(fd, _t.TCSADRAIN)
+
+
+def _cursor_row(fd: int, wait: float = 0.25) -> int | None:
+    """Ask the terminal where the cursor is (DSR, ESC[6n). 0-indexed.
+
+    Returns None if it will not say, in which case callers must assume the
+    worst rather than guess.
+    """
+    import re
+    import select as _sel
+
+    if not sys.stdin.isatty():
+        return None
+    try:
+        sys.stdout.write("\x1b[6n")
+        sys.stdout.flush()
+    except OSError:
+        return None
+    buf = b""
+    step = 0.05
+    waited = 0.0
+    while waited < wait:
+        ready, _, _ = _sel.select([fd], [], [], step)
+        waited += step
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 64)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+        m = re.search(rb"\x1b\[(\d+);(\d+)R", buf)
+        if m:
+            return max(0, int(m.group(1)) - 1)
+        if not buf.startswith(b"\x1b["):
+            return None      # that was a keypress, not a reply
+    return None
+
+
+def _ensure_room(fd: int, rows: int) -> None:
+    """Scroll just enough that `rows` lines fit below the cursor.
+
+    Redrawing in place only works while the region does not move. Drawn
+    near the bottom of a window, every keypress scrolls the screen, the
+    cursor-up can no longer reach our own previous frame, and the list
+    marches down taking the wizard's earlier output with it. Moving up
+    front, the frame sits still for the rest of the run.
+    """
+    try:
+        height = os.get_terminal_size(sys.stdout.fileno()).lines
+    except OSError:
+        return
+    if height <= 0 or rows <= 0 or rows >= height:
+        return
+    row = _cursor_row(fd)
+    if row is None:
+        return          # terminal will not say; leave it alone
+    need = row + rows - (height - 1)
+    if need > 0:
+        sys.stdout.write("\n" * need)
+        sys.stdout.flush()
+
+
 def _run(menu: Menu, prompt: str, multi: bool):
     """Raw-mode loop. Returns cursor / selected set, None on abort.
 
@@ -233,7 +311,13 @@ def _run(menu: Menu, prompt: str, multi: bool):
     except termios.error:
         return None
     try:
-        tty.setraw(fd)
+        _set_keyboard_raw(fd)
+        # A menu drawn low in the window makes the terminal scroll on every
+        # keypress, and once it scrolls, cursor-up cannot reach our own
+        # previous frame. The list then marches down the screen and takes
+        # the wizard's earlier output with it. Make room first, once, so
+        # every redraw lands in the same place.
+        _ensure_room(fd, _visual_height(menu.render(prompt, multi, width=width), width))
         while True:
             frame = menu.render(prompt, multi, width=width)
             rows = _visual_height(frame, width)
@@ -242,7 +326,9 @@ def _run(menu: Menu, prompt: str, multi: bool):
             # frame's last row once written.
             if prev_rows:
                 sys.stdout.write(f"\x1b[{max(0, prev_rows - 1)}A\r")
-            sys.stdout.write("\x1b[J" + frame)
+            # CRLF, not LF. Raw mode strips ONLCR, so a bare \n is only a
+            # line feed and leaves the column where the last line ended.
+            sys.stdout.write("\x1b[J" + frame.replace("\n", "\r\n"))
             sys.stdout.flush()
             prev_rows = rows
 

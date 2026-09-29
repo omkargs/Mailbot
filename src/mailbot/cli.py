@@ -540,6 +540,30 @@ def cmd_cancel(args, cfg):
     return 0 if ok else 1
 
 
+def cmd_requeue(args, cfg):
+    """Re-queue mail the cursor skipped. Sends nothing by itself.
+
+    If the cursor ever jumped past mail that was fetched but never
+    processed, that mail is still in Gmail and still in the local store.
+    Clearing the cursor makes the next scan pick it up again.
+    """
+    from .storage import db as _db
+
+    with _db.db() as c:
+        n = c.execute(
+            "SELECT COUNT(*) n FROM messages WHERE processed_at IS NULL").fetchone()["n"]
+        rows = c.execute("SELECT account FROM cursors WHERE stream='inbox'").fetchall()
+    if not rows:
+        print("No cursor set — nothing to re-queue.")
+        return 0
+    for r in rows:
+        _db.set_cursor(r["account"], "inbox", "")
+    print(f"Cleared the inbox cursor for {len(rows)} account(s).")
+    print(f"{n} unprocessed message(s) will be re-fetched on the next scan.")
+    print("Run `mail-agent scan --dry-run` first if you want to see them.")
+    return 0
+
+
 def cmd_reset(args, cfg):
     """Wipe the agent's working memory. Credentials and the voice profile stay.
 
@@ -636,6 +660,10 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen; send, file and draft nothing")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("requeue-unprocessed",
+                       help="re-fetch mail the cursor skipped; sends nothing")
+    p.set_defaults(fn=cmd_requeue)
 
     p = sub.add_parser("explain", help="why would this message be held?")
     p.add_argument("message_id")
