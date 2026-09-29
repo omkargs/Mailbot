@@ -85,10 +85,15 @@ say()  { printf '%s\n' "$*"; _log "$(_strip_ansi "$*")" 2>/dev/null || true; }
 ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; _log "$(_strip_ansi "✔ $*")" 2>/dev/null || true; }
 warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; _log "$(_strip_ansi "! $*")" 2>/dev/null || true; }
 die()  {
-  printf '%s✘ %s%s\n' "$RST" "$1" "$RST"
-  shift
-  [ $# -gt 0 ] && printf '%s\n' "$@"
-  _log "FATAL: $1" 2>/dev/null || true
+  local head="$1"
+  printf '%s✘ %s%s\n' "$RST" "$head" "$RST"
+  shift || true
+  # Remaining args are indented detail lines. `[ $# -gt 0 ]` keeps `set -u`
+  # happy when die is called with a single argument.
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@"
+  fi
+  _log "FATAL: $head" 2>/dev/null || true
   exit 1
 }
 
