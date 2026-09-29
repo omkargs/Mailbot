@@ -32,6 +32,9 @@ HELP = """\
 */tasks* — list scheduled jobs
 */cancel <id>* — cancel a scheduled job
 */skill <name>* — run a saved automation
+*/profiles* — list inbox profiles
+*/change-profile <name>* — switch inbox profile
+*/whoami* — which profile is active
 */help* — this message
 """
 
@@ -115,5 +118,62 @@ def handle_text(
 
     if cmd in ("reset", "forget", "clear"):
         return chat_ops["reset"]()
+
+    if cmd == "profiles":
+        from .. import profiles as _profiles
+
+        _profiles.ensure_migrated()
+        rows = _profiles.list_profiles()
+        if not rows:
+            return "No profiles yet."
+        cur = _profiles.get_current()
+        lines = []
+        for i, r in enumerate(rows, 1):
+            mark = "●" if cur and r["id"] == cur["id"] else "○"
+            lines.append(f"{mark} {i}. {r['name']} ({r['account']})")
+        lines.append("Switch: /change-profile <name>")
+        return "\n".join(lines)
+
+    if cmd in ("change-profile", "profile"):
+        from .. import profiles as _profiles
+
+        _profiles.ensure_migrated()
+        if not arg:
+            return "Usage: /change-profile <name> — see /profiles."
+        rows = _profiles.list_profiles()
+        want = arg.strip().lower()
+        hit = next((r for r in rows
+                    if r["id"].lower() == want or r["name"].lower() == want), None)
+        if hit is None and want.isdigit():
+            idx = int(want) - 1
+            hit = rows[idx] if 0 <= idx < len(rows) else None
+        if hit is None:
+            return f"No profile {arg!r} — see /profiles."
+        _profiles.set_current(hit["id"])
+        return f"Switched to {_profiles.header_for(hit)}."
+
+    if cmd == "whoami":
+        from .. import profiles as _profiles
+
+        _profiles.ensure_migrated()
+        cur = _profiles.get_current()
+        if not cur:
+            return "No active profile."
+        addr = ""
+        p = (providers or {}).get(cur["account"])
+        if p is not None:
+            addr = getattr(p, "address", "") or ""
+        model = (cur.get("model_override") or "").strip() or cfg.router.model
+        lines = [f"You are talking to {_profiles.header_for(cur, addr)}.",
+                 f"inbox: {addr or cur['account']}",
+                 f"brain: {model}"]
+        try:
+            from pathlib import Path as _P
+
+            prof = _P(cfg.brain_path()) / f"profile-{cur['account']}.md"
+            lines.append(f"voice: {'learned' if prof.exists() else 'not learned yet — /brain'}")
+        except Exception:
+            pass
+        return "\n".join(lines)
 
     return f"Unknown command /{cmd}. Try /help."

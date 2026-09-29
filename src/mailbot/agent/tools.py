@@ -304,14 +304,29 @@ class ToolBox:
     """
 
     def __init__(self, provider: MailProvider, cfg, run_id: int, notify=None,
-                 allow_permission_change: bool = False):
+                 allow_permission_change: bool = False,
+                 profile: dict[str, Any] | None = None):
         self.p = provider
         self.cfg = cfg
         self.run_id = run_id
         self.notify = notify
         self.allow_permission_change = allow_permission_change
+        self.profile = profile
         self.stats = {"triaged": 0, "drafted": 0, "sent": 0, "escalated": 0}
         self._label_cache: dict[str, str] = {}
+
+    def _tag(self) -> str:
+        """Profile header so the owner always knows whose inbox this is."""
+        from ..profiles import header_for
+
+        try:
+            return header_for(self.profile, getattr(self.p, "address", "") or "")
+        except Exception:
+            return ""
+
+    def _tagged(self, text: str) -> str:
+        tag = self._tag()
+        return f"{tag} {text}" if tag else text
 
     def _label_id(self, name: str) -> str:
         if name not in self._label_cache:
@@ -445,11 +460,11 @@ class ToolBox:
             )
             if not verdict.allowed and "escalation keyword" in verdict.reason:
                 self.stats["escalated"] += 1
-                self._notify(
+                self._notify(self._tagged(
                     f"Draft ready, needs your call — {a['to'][0]}: {a.get('subject','')}\n\n"
                     f"{' '.join(a['body'].split())[:200]}\n\n"
                     f"Open Gmail drafts to read, or tell me to send/discard it."
-                )
+                ))
         return {"ok": bool(did), "draft_id": did}
 
     # ------------------------------------------------------------- calendar
@@ -481,9 +496,10 @@ class ToolBox:
             db.create_approval(approval_id, self.p.account, "calendar_invite", payload,
                                reason=f"invite to calendar event with {', '.join(attendees)}")
             self.stats["escalated"] += 1
-            mid = self._notify(
+            mid = self._notify(self._tagged(
                 f"Approval needed: invite {', '.join(attendees)} to '{a['summary']}' "
-                f"({a['start']})",
+                f"({a['start']})"
+            ),
                 approval_id=approval_id,
             )
             if mid:
@@ -518,8 +534,9 @@ class ToolBox:
             "event_id": event_id, "reason": a.get("reason", ""),
         }, reason=f"delete calendar event {event_id}")
         self.stats["escalated"] += 1
-        mid = self._notify(
-            f"Approval needed: delete calendar event {event_id} — {a.get('reason', 'no reason given')}",
+        mid = self._notify(self._tagged(
+            f"Approval needed: delete calendar event {event_id} — {a.get('reason', 'no reason given')}"
+        ),
             approval_id=approval_id,
         )
         if mid:
@@ -600,7 +617,7 @@ class ToolBox:
             if ok:
                 self.stats["sent"] += 1
                 db.log_action("send", self.p.account, recipients, detail=subject)
-                self._notify(self._sent_notice(to_addrs, subject, body, verdicts))
+                self._notify(self._tagged(self._sent_notice(to_addrs, subject, body, verdicts)))
             return {"ok": ok, "mode": "auto"}
 
         # Otherwise queue for the user. The ping must show WHAT is being
@@ -621,7 +638,7 @@ class ToolBox:
         excerpt = " ".join(body.split())[:150]
         if excerpt:
             ping += f"\n“{excerpt}”"
-        mid = self._notify(ping, approval_id=approval_id)
+        mid = self._notify(self._tagged(ping), approval_id=approval_id)
         if mid:
             db.mark_approval_pushed(approval_id, "notify", str(mid))
         return {"ok": True, "mode": "queued", "approval_id": approval_id, "reason": reasons}
@@ -681,12 +698,12 @@ class ToolBox:
             msg = f"{addr} added — I'll reply to them without asking from now on."
         else:
             msg = f"{addr} removed — I'll ask before replying to them again."
-        self._notify(msg)
+        self._notify(self._tagged(msg))
         return {"ok": True, "address": addr, "allow": allow, "echo": msg}
 
     def _t_escalate(self, a: dict[str, Any]) -> dict[str, Any]:
         self.stats["escalated"] += 1
-        self._notify(a["question"])
+        self._notify(self._tagged(a["question"]))
         return {"ok": True, "delivered": True}
 
     def _t_run_skill(self, a: dict[str, Any]) -> dict[str, Any]:

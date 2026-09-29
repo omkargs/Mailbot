@@ -117,3 +117,46 @@ def test_run_once_defaults_to_global_model(provider, cfg, monkeypatch):
                          body="Just saying hello to you friend")
     R.run_once("google", provider, cfg, messages=list(provider.inbox))
     assert seen["model"] == cfg.router.model
+
+
+def test_set_current_switches_exactly_one(monkeypatch, tmp_path):
+    from mailbot import profiles as P
+    from mailbot.storage import db
+
+    _isolate(monkeypatch, tmp_path)
+    P.ensure_migrated()
+    with db.db() as c:
+        c.execute("INSERT INTO profiles (id, name, account, model_override, is_current, created_at)"
+                  " VALUES (?, ?, ?, ?, ?, ?)",
+                  ("work", "Work", "google", "", 0, "2026-01-01"))
+    assert P.set_current("work")["id"] == "work"
+    assert P.get_current()["id"] == "work"
+    assert P.set_current("nope") is None
+    assert P.get_current()["id"] == "work"
+
+
+def test_chat_profiles_and_switch_and_whoami(provider, cfg):
+    from mailbot.agent.chat import handle_text
+    from mailbot import profiles as P
+
+    P.ensure_migrated()
+    out = handle_text("/profiles", cfg, {"google": provider}, {})
+    assert "Personal" in out and "/change-profile" in out
+    assert "No profile" in handle_text("/change-profile nope", cfg, {"google": provider}, {})
+    out = handle_text("/whoami", cfg, {"google": provider}, {})
+    assert "Personal" in out and "brain:" in out
+
+
+def test_toolbox_tags_carry_profile(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot import profiles as P
+
+    P.ensure_migrated()
+    cur = P.get_current()
+    sent = []
+    box = ToolBox(provider, cfg, run_id=1,
+                  notify=lambda t, approval_id="": sent.append(t) or "1",
+                  profile=cur)
+    box.run("send_message", {"to": ["new@x.com"], "subject": "Hi",
+                             "body": "Just saying hello to you friend"})
+    assert sent and sent[0].startswith("[Personal ·")

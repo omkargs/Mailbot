@@ -162,12 +162,19 @@ def answer(
         return "Ask me anything about your mail."
 
     db.migrate()
-    run_id = db.start_run(provider.account, "chat", cfg.router.model)
+    from .. import profiles as _profiles
+
+    _profiles.ensure_migrated()
+    cur = _profiles.get_current()
+    chat_model = _profiles.model_for(cur, cfg.router.model)
+    run_id = db.start_run(provider.account, "chat", chat_model)
     try:
         client = build_client(cfg.router)
         # Owner-originated chat: the user is in the room, so standing
         # authority changes (auto-send allowlist) are legitimate here.
-        box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=True)
+        # The current profile tags every message the bot sends back.
+        box = ToolBox(provider, cfg, run_id, notify=notify,
+                      allow_permission_change=True, profile=cur)
         system = _system_blocks(CONVERSATION_PROMPT.format(
             profile=build_prompt(provider.account, cfg),
         ))
@@ -182,7 +189,7 @@ def answer(
         reply = ""
         for _ in range(MAX_TURNS):
             resp = guarded_call(client, 
-                model=cfg.router.model,
+                model=chat_model,
                 max_tokens=cfg.router.max_tokens,
                 system=system,
                 tools=_cached_tool_list(),

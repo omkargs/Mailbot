@@ -76,6 +76,7 @@ def run_once(
     notify=None,
     messages: list[dict[str, Any]] | None = None,
     model: str | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One agent pass over the pending messages for an account.
 
@@ -93,7 +94,8 @@ def run_once(
     run_id = db.start_run(account, trigger, model or cfg.router.model)
     client = build_client(cfg.router)
     # Email-driven: standing authority changes are refused in this context.
-    box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=False)
+    box = ToolBox(provider, cfg, run_id, notify=notify,
+                  allow_permission_change=False, profile=profile)
 
     pending = messages if messages is not None else db.unprocessed(account, limit=cfg.agent.max_drafts_per_run)
     if not pending:
@@ -297,7 +299,7 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
         return {"status": "empty", "new": 0}
     log.info("%s: %d new messages", provider.account, len(new))
     res = run_once(provider.account, provider, cfg, trigger="scan", notify=notify, messages=new,
-                   model=model)
+                   model=model, profile=profile)
     # Advance only on a clean run so a crash does not swallow pending mail.
     if res.get("status") == "ok":
         advance_cursor(provider)

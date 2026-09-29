@@ -54,6 +54,24 @@ def get_current() -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def set_current(profile_id: str) -> dict[str, Any] | None:
+    """Switch the active profile. Exactly one current at any time.
+    Returns the new current row, or None when the id is unknown."""
+    from .storage import db
+
+    db.migrate()
+    with db.db() as c:
+        row = c.execute("SELECT * FROM profiles WHERE id=?",
+                        (profile_id,)).fetchone()
+        if not row:
+            return None
+        c.execute("UPDATE profiles SET is_current=0")
+        c.execute("UPDATE profiles SET is_current=1 WHERE id=?",
+                  (profile_id,))
+        return dict(c.execute("SELECT * FROM profiles WHERE id=?",
+                              (profile_id,)).fetchone())
+
+
 def ensure_migrated() -> bool:
     """Migrate a single-account install to one 'personal' profile.
 
