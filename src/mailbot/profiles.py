@@ -132,5 +132,58 @@ def header_for(profile: dict[str, Any] | None, address: str = "") -> str:
     return f"[{who}]"
 
 
+def slug(name: str) -> str:
+    """'Family Mail' -> 'family-mail'. Safe for ids and filenames."""
+    import re
+
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return s or "inbox"
+
+
+def creds_file(profile_id: str) -> Path:
+    from .config import CONFIG_DIR
+
+    return CONFIG_DIR / f"google-credentials-{profile_id}.json"
+
+
+def token_file(profile_id: str) -> Path:
+    from .config import CONFIG_DIR
+
+    return CONFIG_DIR / f"google-token-{profile_id}.json"
+
+
+def add_profile(name: str, account: str, model_override: str = "") -> dict[str, Any]:
+    """Register a new inbox profile. Raises ValueError on duplicate id.
+
+    The first profile ever added becomes current. Mirrors into config.json.
+    """
+    from .storage import db
+
+    ensure_migrated()
+    pid = slug(name)
+    with db.db() as c:
+        if c.execute("SELECT 1 FROM profiles WHERE id=?", (pid,)).fetchone():
+            raise ValueError(f"profile {pid!r} already exists")
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        first = c.execute("SELECT COUNT(*) n FROM profiles").fetchone()["n"] == 0
+        c.execute(
+            "INSERT INTO profiles (id, name, account, model_override, "
+            "is_current, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, name.strip(), account, (model_override or "").strip(),
+             1 if first else 0, now),
+        )
+        row = dict(c.execute("SELECT * FROM profiles WHERE id=?", (pid,)).fetchone())
+    data = _read_cfg()
+    profs = data.get("profiles", [])
+    if not any(p.get("id") == pid for p in profs):
+        profs.append({"id": pid, "name": name.strip(), "account": account,
+                      "model_override": (model_override or "").strip()})
+        data["profiles"] = profs
+        _write_cfg(data)
+    return row
+
+
 def config_path() -> Path:
     return CONFIG_PATH

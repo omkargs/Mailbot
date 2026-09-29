@@ -30,6 +30,34 @@ def build_providers(cfg: config.Config | None = None) -> dict[str, MailProvider]
             calendar_enabled=cfg.google.calendar_enabled,
         )
 
+    # Extra Gmail inboxes, one per profile (account id "google:<slug>").
+    # Each carries its own OAuth files, voice, and model override, so family
+    # mail never trains the company voice or vice versa.
+    try:
+        from .. import profiles as _profiles
+
+        for prof in _profiles.list_profiles():
+            acct = prof.get("account", "")
+            if not acct.startswith("google:") or acct in out:
+                continue
+            if enabled and "google" not in enabled and acct not in enabled:
+                continue
+            creds = _profiles.creds_file(prof["id"])
+            if not creds.exists():
+                continue
+            from .gmail import GmailProvider as _GP
+
+            out[acct] = _GP(
+                credentials_file=str(creds),
+                token_file=str(_profiles.token_file(prof["id"])),
+                address="",
+                display_name=prof.get("name", ""),
+                auto_send=cfg.google.auto_send,
+                calendar_enabled=cfg.google.calendar_enabled,
+            )
+    except Exception as e:
+        log.warning("extra inbox profiles skipped: %s", type(e).__name__)
+
     want_ms = "microsoft" in enabled or (enabled and "ms" in enabled)
     if want_ms and cfg.microsoft.client_id and cfg.microsoft.tenant_id:
         from .graph import GraphProvider

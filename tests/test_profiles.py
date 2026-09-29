@@ -160,3 +160,57 @@ def test_toolbox_tags_carry_profile(provider, cfg):
     box.run("send_message", {"to": ["new@x.com"], "subject": "Hi",
                              "body": "Just saying hello to you friend"})
     assert sent and sent[0].startswith("[Personal ·")
+
+
+def test_slug():
+    from mailbot import profiles as P
+
+    assert P.slug("Family Mail") == "family-mail"
+    assert P.slug("  Work! ") == "work"
+    assert P.slug("") == "inbox"
+
+
+def test_add_profile_registers_inbox(monkeypatch, tmp_path):
+    import json as _json
+    from mailbot import profiles as P
+
+    _isolate(monkeypatch, tmp_path)
+    row = P.add_profile("Family", "google:family")
+    assert row["id"] == "family"
+    assert row["account"] == "google:family"
+    assert row["is_current"] == 0  # personal stays current
+    data = _json.loads((tmp_path / "cfg" / "config.json").read_text())
+    assert any(p["id"] == "family" for p in data["profiles"])
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        P.add_profile("Family", "google:family")
+
+
+def test_factory_builds_extra_inbox(monkeypatch, tmp_path):
+    import json as _json
+    from mailbot import profiles as P
+    from mailbot.config import load as _load
+    from mailbot.providers import build_providers
+
+    _isolate(monkeypatch, tmp_path)
+    P.ensure_migrated()
+    P.add_profile("Family", "google:family")
+    creds = P.creds_file("family")
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_text(_json.dumps({"installed": {"client_id": "x"}}))
+    provs = build_providers(_load())
+    assert "google:family" in provs
+    assert provs["google:family"].display_name == "Family"
+
+
+def test_factory_skips_inbox_without_creds(monkeypatch, tmp_path):
+    from mailbot import profiles as P
+    from mailbot.config import load as _load
+    from mailbot.providers import build_providers
+
+    _isolate(monkeypatch, tmp_path)
+    P.ensure_migrated()
+    P.add_profile("Family", "google:family")
+    provs = build_providers(_load())
+    assert "google:family" not in provs

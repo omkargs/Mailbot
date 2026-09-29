@@ -271,6 +271,9 @@ def cmd_setup(args, cfg) -> int:
     state = _load_state()
 
     # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
+    # add-inbox is standalone: a full run never invents inboxes.
+    if only == "add-inbox":
+        return _step_add_inbox(state)
     plan = []
     if not only or only == "provider":
         plan.append("provider")
@@ -502,6 +505,62 @@ def cmd_setup(args, cfg) -> int:
         print("\n  Mailbot is ready. Next: `mail-agent status`, `mail-agent cal`, `./start.sh bg`")
         return 0
     print("\n  Not ready yet — fix the ! lines above, then re-run `mail-agent setup`.")
+    return 1
+
+
+def _step_add_inbox(state: dict) -> int:
+    """Add another Gmail inbox as its own profile: own OAuth files, own
+    voice, own model override. Reuses the paste-JSON + headless auth flow."""
+    from . import profiles as _profiles
+    from .providers import build_providers
+    from .config import load as _load
+
+    print("\n  Add another inbox. Each inbox gets its own profile, voice,")
+    print("  and credentials — family mail never trains the company voice.")
+    if not _tty():
+        print("  ! needs a terminal (paste + browser flow). Re-run on a TTY.")
+        return 1
+    try:
+        name = input("  Profile name (e.g. Family, Company): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+    if not name:
+        print("  ! a name is required")
+        return 1
+    pid = _profiles.slug(name)
+    account = f"google:{pid}"
+    try:
+        _profiles.add_profile(name, account)
+    except ValueError as e:
+        print(f"  ! {e}")
+        return 1
+    creds = _profiles.creds_file(pid)
+    print(f"\n  Step 1/2 — OAuth client JSON for {name}:")
+    print("    Same 5-minute Cloud Console flow (its own OAuth client), then")
+    if not collect_credentials_json(creds):
+        print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
+        return 1
+    print(f"\n  Step 2/2 — sign in {name}:")
+    token = _profiles.token_file(pid)
+    if not headless_google_auth(creds, out_token=token):
+        print("  ! sign-in did not complete")
+        return 1
+    p = build_providers(_load()).get(account)
+    if p and p.valid():
+        from .storage import db as _db
+
+        # New inboxes start conservative: account-level auto-send off until
+        # the owner approves contacts. Address lives in the accounts table,
+        # never in shared secrets (GOOGLE_ACCOUNT stays the primary inbox).
+        _db.upsert_account(account, p.address, name,
+                           auto_send=False, calendar=True)
+        print(f"  inbox OK: {name} signed in as {p.address}")
+        print(f"  voice: run `mail-agent brain` to learn {name}'s writing")
+        print(f"  chat: /profiles, then /change-profile {pid}")
+        _save_state({**state, f"inbox-{pid}": "ok"})
+        return 0
+    print("  ! sign-in did not verify")
     return 1
 
 
