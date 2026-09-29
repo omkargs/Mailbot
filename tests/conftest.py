@@ -64,6 +64,7 @@ class FakeProvider:
         self.labels: dict[str, str] = {"lbl_1": "Urgent"}
         self.events: list[dict] = []
         self.inbox: list[dict] = []
+        self.get_messages_calls: list[list[str]] = []
         self._next = 1
         MailProvider.register(FakeProvider)
 
@@ -99,6 +100,13 @@ class FakeProvider:
         return out[:limit]
     def get_message(self, message_id):
         return next((m for m in self.inbox if m["id"] == message_id), None)
+    def get_messages(self, message_ids):
+        # Implemented rather than inherited so tests can assert the batch was
+        # actually asked for. Inheriting the per-id fallback hid a real bug:
+        # the caller passed a set, which is not sliceable, so the batch call
+        # raised and body prefetch silently did nothing on every run.
+        self.get_messages_calls.append(list(message_ids))
+        return [m for m in (self.get_message(i) for i in message_ids) if m]
     def get_thread(self, thread_id):
         return [m for m in self.inbox if m["thread_id"] == thread_id]
     def search(self, query="", sender="", subject="", since="", limit=25, full=False):

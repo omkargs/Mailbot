@@ -127,7 +127,7 @@ def prune(messages: list[dict[str, Any]], verdicts: dict[str, dict[str, str]],
                 box.stats["triaged"] += 1
                 db.log_action("archive", provider.account, m["id"],
                               detail="triage:ignore")
-                db.mark_processed(m["id"])
+                db.mark_processed(m["id"], getattr(provider, "account", ""))
                 archived += 1
                 continue
         except Exception as e:

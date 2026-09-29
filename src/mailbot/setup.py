@@ -427,7 +427,7 @@ def step_voice(state: dict[str, Any]) -> None:
             db.upsert_message(m)
             kept += 1
         if kept:
-            db.mark_processed_many([m["id"] for m in msgs[:200]])
+            db.mark_processed_many([m["id"] for m in msgs[:200]], p.account)
         profile = build_profile("google")
         path = load().brain_path() / "profile-google.md"
         path.parent.mkdir(parents=True, exist_ok=True)

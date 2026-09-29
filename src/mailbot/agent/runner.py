@@ -219,7 +219,7 @@ def run_once(
 
         if completed:
             for m in pending:
-                db.mark_processed(m["id"])
+                db.mark_processed(m["id"], account)
         else:
             log.info("not marking %d message(s) processed; they will be retried", len(pending))
 
@@ -303,10 +303,17 @@ def fetch_new(provider: MailProvider, limit: int = 0, cfg: Config | None = None)
     # Fetch the bodies of what is actually new, in one batch. The run prompt
     # includes them, so the model does not spend a round trip per message.
     try:
+        # new_ids is a set, and a set is not sliceable. This used to raise
+        # TypeError, was swallowed by the except below, and body prefetch was
+        # therefore dead on every run: the model triaged on subject and
+        # snippet alone, with no body, for the life of the project.
         pre = cfg.agent.body_prefetch if cfg is not None else 12
-        full = provider.get_messages(new_ids[:max(1, pre)])
+        full = provider.get_messages(sorted(new_ids)[:max(1, pre)])
     except Exception as e:
-        log.warning("body prefetch failed: %s", type(e).__name__)
+        # Log the message, not just the class. A bare "TypeError" told us
+        # nothing and hid a bug that had been silently killing body prefetch
+        # on every single run.
+        log.warning("body prefetch failed: %s: %s", type(e).__name__, e)
         full = []
 
     by_id = {m["id"]: m for m in full}
@@ -317,7 +324,8 @@ def fetch_new(provider: MailProvider, limit: int = 0, cfg: Config | None = None)
                 continue
             if m["id"] in by_id and by_id[m["id"]].get("body"):
                 body = by_id[m["id"]]["body"]
-                c.execute("UPDATE messages SET body=? WHERE id=?", (body, m["id"]))
+                c.execute("UPDATE messages SET body=? WHERE id=? AND account=?",
+                          (body, m["id"], provider.account))
                 m["body"] = body
             new.append(m)
     return new

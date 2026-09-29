@@ -8,6 +8,8 @@ Re-running the agent after a crash must never re-send.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -16,6 +18,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import DB_PATH, DATA_DIR
+
+log = logging.getLogger(__name__)
 
 _lock = threading.RLock()
 
@@ -49,9 +53,9 @@ SCHEMA = [
     # ---------- messages ----------
     """
     CREATE TABLE IF NOT EXISTS messages (
-        id            TEXT PRIMARY KEY,          -- provider message id
-        account       TEXT NOT NULL,
-        thread_id     TEXT,
+        id            TEXT NOT NULL,             -- provider id: unique within
+        account       TEXT NOT NULL,             --   ONE mailbox, never across
+        thread_id     TEXT,                      --   two, so the key is both
         sender        TEXT,
         sender_name   TEXT,
         recipients    TEXT,
@@ -64,6 +68,7 @@ SCHEMA = [
         size_bytes    INTEGER,
         processed_at  TEXT,                      -- set once the agent has triaged it
         stored_at     TEXT NOT NULL,
+        PRIMARY KEY (id, account),
         FOREIGN KEY (account) REFERENCES accounts(id)
     )
     """,
@@ -116,8 +121,8 @@ SCHEMA = [
     # ---------- drafts ----------
     """
     CREATE TABLE IF NOT EXISTS drafts (
-        id            TEXT PRIMARY KEY,
-        account       TEXT NOT NULL,
+        id            TEXT NOT NULL,             -- Gmail's own draft id: per
+        account       TEXT NOT NULL,             --   mailbox, so keyed with it
         run_id        INTEGER,
         in_reply_to   TEXT,
         to_addr       TEXT,
@@ -125,6 +130,7 @@ SCHEMA = [
         body          TEXT,
         status        TEXT NOT NULL DEFAULT 'created',  -- created|sent|discarded
         created_at    TEXT NOT NULL,
+        PRIMARY KEY (id, account),
         FOREIGN KEY (run_id) REFERENCES runs(id)
     )
     """,
@@ -238,11 +244,79 @@ def db() -> Iterator[sqlite3.Connection]:
             conn.close()
 
 
+def _table_sql(conn, name: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return (row["sql"] if row else "") or ""
+
+
+def _pk_columns(conn, name: str) -> list[str]:
+    """The table's primary key columns, in order, as the database sees them.
+
+    Read from PRAGMA rather than by pattern-matching the stored CREATE TABLE
+    text. Matching a string is guesswork that breaks the first time someone
+    reformats a column, and a wrong guess here means either skipping a
+    migration or running one that was not needed.
+    """
+    if not _table_sql(conn, name):
+        return []
+    rows = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+    # `pk` is the 1-based position within the key; 0 means "not in the key".
+    keyed = [r for r in rows if r["pk"]]
+    return [r["name"] for r in sorted(keyed, key=lambda r: r["pk"])]
+
+
+def _needs_composite_key(conn, name: str) -> bool:
+    """True when `name` is still keyed on id alone.
+
+    messages and drafts were keyed on the provider id by itself. That id is
+    unique WITHIN a mailbox and not across mailboxes, so with a second
+    inbox configured two mailboxes sharing an id collided: the second
+    message looked already-stored, was treated as seen, and was silently
+    never triaged. The key has to be (id, account).
+    """
+    return _pk_columns(conn, name) == ["id"]
+
+
+def _rebuild_composite_key(conn, name: str) -> None:
+    """Rebuild `name` with PRIMARY KEY (id, account), keeping every row."""
+    old_sql = _table_sql(conn, name)
+    if not old_sql:
+        return
+    body = old_sql[old_sql.index("(") + 1: old_sql.rindex(")")]
+    cols: list[str] = []
+    for raw in body.splitlines():
+        line = raw.split("--", 1)[0].strip().rstrip(",").strip()
+        if not line:
+            continue
+        if line.upper().startswith(("FOREIGN KEY", "PRIMARY KEY", "UNIQUE", "CHECK")):
+            continue
+        # Drop the old inline PRIMARY KEY; the table-level one replaces it.
+        line = re.sub(r"\s+PRIMARY\s+KEY", "", line, flags=re.I)
+        cols.append(line)
+    # CREATE TABLE needs full definitions; the INSERT column list must be
+    # bare names. Using one string for both is a syntax error.
+    defs = ", ".join(cols)
+    names = ", ".join(c.split()[0] for c in cols)
+    conn.execute(f'ALTER TABLE "{name}" RENAME TO "{name}_old_composite"')
+    conn.execute(f'CREATE TABLE "{name}" ({defs}, PRIMARY KEY (id, account))')
+    conn.execute(
+        f'INSERT OR IGNORE INTO "{name}" ({names}) SELECT {names} FROM "{name}_old_composite"')
+    conn.execute(f'DROP TABLE "{name}_old_composite"')
+
+
 def migrate() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with db() as conn:
         for stmt in SCHEMA:
             conn.execute(stmt)
+        # A table created fresh above is already correct; only an existing
+        # one needs rebuilding.
+        for t in ("messages", "drafts"):
+            if _needs_composite_key(conn, t):
+                log.info("rekeying %s to (id, account) for multi-inbox safety", t)
+                _rebuild_composite_key(conn, t)
 
 
 def now() -> str:
@@ -318,13 +392,16 @@ def upsert_message(msg: dict[str, Any]) -> bool:
             """INSERT OR IGNORE INTO accounts (id, updated_at) VALUES (?,?)""",
             (msg["account"], now()),
         )
-        exists = c.execute("SELECT 1 FROM messages WHERE id=?", (msg["id"],)).fetchone()
+        exists = c.execute(
+            "SELECT 1 FROM messages WHERE id=? AND account=?",
+            (msg["id"], msg["account"]),
+        ).fetchone()
         c.execute(
             """INSERT INTO messages
                (id, account, thread_id, sender, sender_name, recipients, subject,
                 snippet, body, date, label_ids, has_attach, size_bytes, stored_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET
+               ON CONFLICT(id, account) DO UPDATE SET
                  snippet=excluded.snippet, label_ids=excluded.label_ids,
                  has_attach=excluded.has_attach""",
             (
@@ -337,9 +414,20 @@ def upsert_message(msg: dict[str, Any]) -> bool:
     return not exists
 
 
-def mark_processed(message_id: str) -> None:
+def mark_processed(message_id: str, account: str = "") -> None:
+    """Mark one message triaged.
+
+    `account` is optional for compatibility, but every caller in this
+    codebase knows it and should pass it: with more than one inbox
+    configured, updating by id alone can mark a DIFFERENT inbox's message,
+    and that mailbox then silently loses mail it never processed.
+    """
     with db() as c:
-        c.execute("UPDATE messages SET processed_at=? WHERE id=?", (now(), message_id))
+        if account:
+            c.execute("UPDATE messages SET processed_at=? WHERE id=? AND account=?",
+                      (now(), message_id, account))
+        else:
+            c.execute("UPDATE messages SET processed_at=? WHERE id=?", (now(), message_id))
 
 
 def unprocessed(account: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -361,16 +449,24 @@ def unprocessed(account: str, limit: int = 50) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def mark_processed_many(ids: list[str]) -> int:
+def mark_processed_many(ids: list[str], account: str = "") -> int:
     """Mark a batch processed. Used by the brain seeder, which consumes the
-    sent folder and must not leave it looking like untriaged mail."""
+    sent folder and must not leave it looking like untriaged mail.
+
+    Pass `account` where you know it - see mark_processed()."""
     if not ids:
         return 0
     with db() as c:
-        cur = c.executemany(
-            "UPDATE messages SET processed_at=? WHERE id=?",
-            [(now(), i) for i in ids],
-        )
+        if account:
+            cur = c.executemany(
+                "UPDATE messages SET processed_at=? WHERE id=? AND account=?",
+                [(now(), i, account) for i in ids],
+            )
+        else:
+            cur = c.executemany(
+                "UPDATE messages SET processed_at=? WHERE id=?",
+                [(now(), i) for i in ids],
+            )
     return cur.rowcount
 
 
@@ -697,10 +793,18 @@ def record_draft(
     id: str, account: str, run_id: int | None, in_reply_to: str,
     to_addr: str, subject: str, body: str,
 ) -> None:
+    """Record a draft the agent created.
+
+    Upserts rather than bare-inserts. Two inboxes can hand back the same
+    provider draft id, and an IntegrityError here would abort a run that had
+    already sent the mail. First record wins; a re-created draft with the same
+    id is the same draft.
+    """
     with db() as c:
         c.execute(
             """INSERT INTO drafts (id, account, run_id, in_reply_to, to_addr, subject, body, created_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(id, account) DO NOTHING""",
             (id, account, run_id, in_reply_to, to_addr, subject, body, now()),
         )
 

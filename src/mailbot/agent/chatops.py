@@ -172,7 +172,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
                     db.upsert_message(m)
                     db.bump_contact(name, m.get("sender", ""), sent=True)
                     seeded.append(m["id"])
-            db.mark_processed_many(seeded)
+            db.mark_processed_many(seeded, getattr(p, "account", ""))
             path = cfg.brain_path() / f"profile-{name}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(build_profile(name))

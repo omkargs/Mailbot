@@ -120,11 +120,24 @@ def cmd_explain(args, cfg):
     mid = args.message_id
     row = None
     with _db.db() as c:
-        row = c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
-    if not row:
+        # An id is unique within one mailbox, not across mailboxes. With two
+        # inboxes configured a collision is possible, and explaining whichever
+        # row happened to sort first would be confidently wrong about the
+        # other inbox. Say so instead.
+        rows = c.execute(
+            "SELECT * FROM messages WHERE id=? ORDER BY account", (mid,)
+        ).fetchall()
+    if not rows:
         print(f"No stored message with id {mid!r}.")
         print("  Ids look like 19fda0eb83f4805e and change per mailbox.")
         return 1
+    if len({r["account"] for r in rows}) > 1:
+        where = ", ".join(sorted({r["account"] for r in rows}))
+        print(f"Id {mid!r} exists in more than one inbox: {where}")
+        print("  Provider ids are only unique per mailbox, so this cannot be")
+        print("  resolved without knowing which inbox you mean.")
+        return 1
+    row = rows[0]
     provider = next((p for p in providers if p.account == row["account"]), None)
     if provider is None:
         print(f"No provider for account {row['account']}.")
@@ -220,7 +233,7 @@ def cmd_brain(args, cfg):
                     seeded.append(m["id"])
             # The sent folder is training data, not inbox. Mark it consumed so
             # it never resurfaces as untriaged mail.
-            db.mark_processed_many(seeded)
+            db.mark_processed_many(seeded, name)
             break
         profile = build_profile(name)
         path = cfg.brain_path() / f"profile-{name}.md"

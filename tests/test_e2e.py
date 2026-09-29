@@ -425,3 +425,23 @@ def test_explain_does_not_short_circuit_the_allowlist(provider, cfg, mock_router
     assert not it["would_send"]
     # The approval itself is not listed as a blocker any more.
     assert "has not been approved" not in joined
+
+
+def test_body_prefetch_actually_asks_the_provider_for_bodies(provider, cfg):
+    """The run prompt carries bodies, so they have to be fetched.
+
+    This regressed silently: the ids were held in a set, a set is not
+    sliceable, so the batch call raised TypeError, a broad `except` swallowed
+    it, and the agent triaged on subject and snippet alone on every run — with
+    no error the operator could see.
+    """
+    from mailbot.agent import runner
+
+    provider.add_message(sender="boss@corp.com", subject="Hi", body="Hello there friend")
+    new = runner.fetch_new(provider)
+
+    assert provider.get_messages_calls, "body prefetch never called the provider"
+    asked = provider.get_messages_calls[-1]
+    # A list, and the ids of the newly stored messages.
+    assert isinstance(asked, list)
+    assert set(asked) == {m["id"] for m in new}

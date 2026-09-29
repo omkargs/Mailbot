@@ -272,22 +272,37 @@ def test_two_inboxes_do_not_share_a_cursor(provider, cfg):
 
 
 def test_message_ids_are_unique_within_an_account():
-    """Documented limitation, pinned so a schema change has to be deliberate.
+    """The same provider id in two inboxes must be two distinct messages.
 
-    The messages table is keyed on the provider message id alone, not
-    (id, account). Gmail ids are unique per mailbox but are not guaranteed
-    unique ACROSS mailboxes, so two inboxes that happen to share an id
-    would collide and the second message would be treated as already seen.
-    Real ids are 16 hex characters, so this is unlikely - but it is a
-    latent flaw in the multi-inbox design, not something to discover later.
+    The messages table used to be keyed on the provider message id alone.
+    Gmail ids are unique per mailbox but not guaranteed unique ACROSS
+    mailboxes, so two inboxes sharing an id collided: the second message
+    looked already-stored, was reported as seen, and was silently never
+    triaged. The key is now (id, account).
     """
     from mailbot.storage import db
 
     base = {"thread_id": "t", "sender": "a@x.com", "subject": "s",
             "date": "2026-01-01T00:00:00Z", "label_ids": ["INBOX"]}
     assert db.upsert_message({**base, "id": "same-id", "account": "google"}) is True
-    # Same id, different account: currently reported as already seen.
+    # Same id, different account: a different message, and therefore new.
+    assert db.upsert_message({**base, "id": "same-id", "account": "google:work"}) is True
+    # Re-fetching either one is still idempotent.
+    assert db.upsert_message({**base, "id": "same-id", "account": "google"}) is False
     assert db.upsert_message({**base, "id": "same-id", "account": "google:work"}) is False
+
+    with db.db() as c:
+        rows = c.execute("SELECT account FROM messages WHERE id='same-id'").fetchall()
+    assert sorted(r["account"] for r in rows) == ["google", "google:work"]
+
+    # Each inbox sees only its own copy as awaiting triage.
+    assert db.count_unprocessed("google") == 1
+    assert db.count_unprocessed("google:work") == 1
+
+    # Marking one processed must not touch the other inbox's copy.
+    db.mark_processed("same-id", "google")
+    assert db.count_unprocessed("google") == 0
+    assert db.count_unprocessed("google:work") == 1
 
 
 def test_upsert_account_never_blanks_a_known_address():
@@ -373,3 +388,28 @@ def test_an_existing_inbox_keeps_its_own_auto_send(monkeypatch):
                             {"auto_send": kw.get("auto_send")}))
     cli._providers(Cfg())
     assert recorded["auto_send"] == 0, recorded
+
+
+def test_chat_history_is_scoped_to_one_inbox():
+    """Two inboxes must not read each other's conversation.
+
+    chat_history had no account column at all, so with a second inbox
+    configured the agent answered "what did she say?" using the other
+    mailbox's history. That is both wrong and a leak between profiles.
+    """
+    from mailbot.agent import chatlog
+
+    chatlog.record("user", "the invoice question", account="google")
+    chatlog.record("agent", "she said the 3rd", account="google")
+    chatlog.record("user", "unrelated work thread", account="work")
+
+    google = [t["content"] for t in chatlog.recent(account="google")]
+    work = [t["content"] for t in chatlog.recent(account="work")]
+
+    assert google == ["the invoice question", "she said the 3rd"]
+    assert work == ["unrelated work thread"]
+
+    # Forgetting one inbox's thread must not wipe the other's.
+    assert chatlog.clear(account="google") == 2
+    assert chatlog.recent(account="google") == []
+    assert len(chatlog.recent(account="work")) == 1
