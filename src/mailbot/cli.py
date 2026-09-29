@@ -98,15 +98,15 @@ def cmd_brain(args, cfg):
     for name, p in providers.items():
         for folder, key in (("SENT", "sent"), ("SENT", "sentitems")):
             try:
-                msgs = p.list_messages(folder=folder, limit=500)
+                msgs = p.list_messages(folder=folder, limit=args.limit)
             except Exception:
                 continue
             seeded = []
-            # Batch the bodies. Fetching 300 sent messages one at a time is
-            # 300 API calls — slow, and enough to hit Gmail's per-minute
-            # quota partway through and silently lose the sample.
+            # Batch the bodies. Fetching hundreds of sent messages one at a
+            # time is one API call each — slow, and enough to hit Gmail's
+            # per-minute quota partway through and silently lose the sample.
             try:
-                fulls = p.get_messages([m["id"] for m in msgs][:300])
+                fulls = p.get_messages([m["id"] for m in msgs][:args.limit])
             except Exception as e:
                 log.warning("sent-folder batch fetch failed: %s", type(e).__name__)
                 fulls = []
@@ -540,6 +540,8 @@ def main() -> int:
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("brain", help="rebuild the style profile from sent mail")
+    p.add_argument("--limit", type=int, default=300,
+                   help="how many sent messages to learn from (default 300)")
     p.set_defaults(fn=cmd_brain)
 
     p = sub.add_parser("voice", help="how much the agent has learned about your voice")

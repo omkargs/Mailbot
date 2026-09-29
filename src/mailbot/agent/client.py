@@ -31,7 +31,7 @@ CACHE_TOOLS = {"type": "ephemeral"}
 CACHE_SYSTEM = {"type": "ephemeral"}
 
 
-def build_client(rc: RouterConfig) -> anthropic.Anthropic:
+def build_client(rc: RouterConfig, timeout: float = 180.0) -> anthropic.Anthropic:
     if not rc.api_key:
         raise RuntimeError("ROUTER_API_KEY not set — run setup.sh or export it")
     # This SDK version appends "/v1/messages" itself. Passing a base_url that
@@ -43,7 +43,7 @@ def build_client(rc: RouterConfig) -> anthropic.Anthropic:
     return anthropic.Anthropic(
         api_key=rc.api_key,
         base_url=base,
-        timeout=180.0,
+        timeout=timeout,
         # Retries are decided by our own limits, not the SDK's. The SDK happily
         # retried a 402 payment-required three times, which spends balance to
         # learn the same thing again.

@@ -107,11 +107,13 @@ def rank(models: list[str]) -> list[str]:
     return known + rest
 
 
-def probe(base_url: str, api_key: str, model: str) -> dict[str, Any]:
+def probe(base_url: str, api_key: str, model: str, timeout: float = 30.0) -> dict[str, Any]:
     """Check a base/key/model actually works, before it is written to config.
 
     Returns {ok, model, said, error}. A model that answers 'OK' is one the
     agent can use; failing here is much cheaper than failing at 3am.
+    Setup uses a short timeout — a dead endpoint must fail in seconds,
+    not after the SDK's 3-minute default.
     """
     from .client import build_client
     from ..config import RouterConfig
@@ -119,7 +121,7 @@ def probe(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     try:
         client = build_client(RouterConfig(
             base_url=base_url, api_key=api_key, model=model, max_tokens=16,
-        ))
+        ), timeout=timeout)
         r = client.messages.create(
             model=model, max_tokens=16,
             messages=[{"role": "user", "content": "Reply with the single word: OK"}],

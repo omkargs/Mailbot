@@ -22,12 +22,15 @@ Design rules:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from .setup import config_dir, read_secrets, write_secret
+
+log = logging.getLogger(__name__)
 
 STATE_FILE = "setup-state.json"
 
@@ -164,6 +167,38 @@ def ensure_config_json() -> Path:
     return p
 
 
+def _run_loopback_once(flow, port: int = 8080, timeout: int = 60):
+    """run_local_server with a guillotine. The oauthlib call blocks until
+    the browser callback arrives — forever, on a box with no browser. The
+    SIGALRM fires in the main thread only; elsewhere we attempt without a
+    net (still better than hanging the process lifetime)."""
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return flow.run_local_server(
+            port=port, open_browser=False, authorization_prompt_message="",
+            success_message="Approved — return to the terminal.")
+
+    class _Timeout(Exception):
+        pass
+
+    def _alarm(signum, frame):
+        raise _Timeout()
+
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(timeout)
+    try:
+        return flow.run_local_server(
+            port=port, open_browser=False, authorization_prompt_message="",
+            success_message="Approved — return to the terminal.")
+    except _Timeout as e:
+        raise TimeoutError(f"no browser callback in {timeout}s") from e
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
 def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> bool:
     """OAuth without requiring a local browser.
 
@@ -187,21 +222,26 @@ def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> boo
     print("\n  Open this URL on ANY device (phone/laptop), approve, continue:")
     print(f"\n  {url}\n")
 
-    # Step 2: loopback server (works over `ssh -L 8080:localhost:8080` too).
-    for port in (8080, 8765, 0):
-        try:
-            flow2 = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
-            creds = flow2.run_local_server(port=port if port else 0,
-                                           open_browser=False,
-                                           authorization_prompt_message="",
-                                           success_message="Approved — return to the terminal.")
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(creds.to_json())
-            out.chmod(0o600)
-            print("  token stored (mode 600)")
-            return True
-        except Exception:
-            continue
+    # Step 2: one loopback attempt with a hard timeout. run_local_server
+    # blocks FOREVER waiting for the browser callback — on an SSH box with
+    # no forwarding that used to hang with zero explanation. Now: 60s,
+    # then straight to paste-the-code. Works over `ssh -L 8080:localhost:8080`.
+    if _tty():
+        print("  Waiting up to 60s for the browser callback…")
+        print("  (remote box? use: ssh -L 8080:localhost:8080 <host>)")
+        print("  Ctrl-C skips straight to paste-the-code.")
+    try:
+        flow2 = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+        creds = _run_loopback_once(flow2, port=8080, timeout=60)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(creds.to_json())
+        out.chmod(0o600)
+        print("  token stored (mode 600)")
+        return True
+    except KeyboardInterrupt:
+        print("\n  skipped the wait — paste the code instead.")
+    except Exception as e:
+        log.debug("loopback auth failed: %s", type(e).__name__)
 
     # Step 3: manual code paste (old Desktop clients still honour OOB-ish copy).
     if not _tty():
@@ -281,6 +321,36 @@ def _looks_like_client(blob: str) -> bool:
         if isinstance(part, dict) and part.get("client_id"):
             return True
     return False
+
+
+def _key_help(base: str) -> str:
+    """Where to get the key, based on the provider. A bare 'export it'
+    is the most hostile sentence in onboarding — the user doesn't know
+    what 'it' is or where it lives."""
+    b = (base or "").lower()
+    if "openrouter" in b:
+        return ("Get one at https://openrouter.ai/keys "
+                "(sign up → Keys → Create)")
+    if "anthropic.com" in b:
+        return ("Get one at https://console.anthropic.com/settings/keys")
+    if "localhost" in b or "127.0.0.1" in b:
+        return ("Use the key your gateway expects "
+                "(LiteLLM: the master key you started it with)")
+    return ("Get one from your router dashboard "
+            "(Bynara: the API-keys page)")
+
+
+def _run_voice(state: dict) -> None:
+    if state.get("google") == "ok":
+        try:
+            from .setup import step_voice
+
+            step_voice(state)
+        except Exception as e:
+            print(f"  ! voice profile failed: {type(e).__name__}")
+            state["voice"] = "failed"
+    else:
+        state.setdefault("voice", "skipped-no-mailbox")
 
 
 def cmd_setup(args, cfg) -> int:
@@ -374,8 +444,11 @@ def cmd_setup(args, cfg) -> int:
         model = s.get("ROUTER_MODEL", "") or DEFAULTS["ROUTER_MODEL"]
         if not key:
             if non_interactive or not _tty():
-                print("  ! ROUTER_API_KEY not set — export it and re-run "
-                      "(or `mail-agent setup --import-env`).")
+                print("  ! No API key yet. This is the password your AI provider")
+                print(f"    bills usage against. {_key_help(base)}")
+                print("    Then: export ROUTER_API_KEY='paste-key-here'")
+                print("    and re-run. (Bulk path: set it in env, then")
+                print("    `mail-agent setup --import-env`.)")
             else:
                 import getpass
                 try:
@@ -482,7 +555,10 @@ def cmd_setup(args, cfg) -> int:
             print("       add yourself as a test user")
             print("    5. Credentials → Create → OAuth client ID → Desktop app →")
             print("       Download JSON")
-            print("    6. Paste it below OR save the file here and re-run:")
+            if not non_interactive and _tty():
+                print("    6. Paste it below OR save the file here and re-run:")
+            else:
+                print("    6. Save the downloaded file here (this shell can't take a paste):")
             print(f"         {creds}")
             if not non_interactive and _tty():
                 if collect_credentials_json(creds):
@@ -538,16 +614,19 @@ def cmd_setup(args, cfg) -> int:
     if (not only or only == "voice") and not skip_voice:
         idx += 1
         _hdr(idx, "voice profile (reads sent mail, ~1 min)")
-        if state.get("google") == "ok":
+        if not only and state.get("voice") == "ok":
+            print("  voice: already learned — skipping (use --step voice to redo)")
+        elif not yes and not non_interactive and _tty() and not only:
             try:
-                from .setup import step_voice
-
-                step_voice(state)
-            except Exception as e:
-                print(f"  ! voice profile failed: {type(e).__name__}")
-                state["voice"] = "failed"
+                ans = input("  Learn your writing now? Reads sent mail (~1 min) [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans in ("n", "no"):
+                state.setdefault("voice", "skipped")
+            else:
+                _run_voice(state)
         else:
-            state.setdefault("voice", "skipped-no-mailbox")
+            _run_voice(state)
 
     # --- service ---
     if (not only or only == "start") and not skip_service:
@@ -559,14 +638,20 @@ def cmd_setup(args, cfg) -> int:
 
     _save_state(state)
     dt = _time.perf_counter() - t0
-    print("\n  setup state: " + ", ".join(f"{k}={v}" for k, v in sorted(state.items())))
-    print(f"  finished in {dt:.0f}s")
+    if dt >= 2:
+        print(f"  finished in {dt:.0f}s")
 
     # Honest exit code: 0 only if provider + google are OK.
     if state.get("provider") == "ok" and state.get("google") == "ok":
         print("\n  Mailbot is ready. Next: `mail-agent status`, `mail-agent cal`, `./start.sh bg`")
         return 0
-    print("\n  Not ready yet — fix the ! lines above, then re-run `mail-agent setup`.")
+    # One next action, not a state dump. First missing thing wins.
+    if state.get("provider") != "ok":
+        print("\n  Next: get the API key (see above), export it, re-run `mail-agent setup`.")
+    elif state.get("google") not in ("ok",):
+        print("\n  Next: finish Google sign-in above, then re-run `mail-agent setup --step google`.")
+    else:
+        print("\n  Next: re-run `mail-agent setup` — something above still needs you.")
     return 1
 
 

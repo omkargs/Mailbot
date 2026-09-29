@@ -125,7 +125,7 @@ def test_fast_skips_voice_service_chat(monkeypatch, tmp_path, capsys):
     assert rc == 1  # missing key + creds: honest failure, not a crash
     out = capsys.readouterr().out
     assert "[1/" in out
-    assert "finished in" in out
+    assert "Next:" in out  # one next action, not a state dump
     state = __import__("json").loads((tmp_path / "cfg" / ".setup-state.json").read_text())
     assert state.get("provider") == "missing-key"
     assert "voice" not in state  # skipped, not failed
@@ -224,3 +224,58 @@ def test_resume_line_shows_prior_state(monkeypatch, tmp_path, capsys):
 
     assert W.cmd_setup(Args(), C.load()) == 0
     assert "Resuming" in capsys.readouterr().out
+
+
+def test_loopback_gives_up_on_time():
+    import time
+    from mailbot import wizard as W
+
+    class HangingFlow:
+        def run_local_server(self, **kw):
+            time.sleep(30)
+
+    t0 = time.time()
+    try:
+        W._run_loopback_once(HangingFlow(), port=18080, timeout=1)
+        assert False, "should have raised"
+    except TimeoutError:
+        pass
+    assert time.time() - t0 < 10
+
+
+def test_key_help_points_at_each_provider():
+    from mailbot import wizard as W
+
+    assert "openrouter.ai/keys" in W._key_help("https://openrouter.ai/api/anthropic")
+    assert "console.anthropic.com" in W._key_help("https://api.anthropic.com")
+    assert "LiteLLM" in W._key_help("http://localhost:4000")
+    assert "Bynara" in W._key_help("https://router.bynara.id")
+
+
+def test_missing_key_says_what_and_where(monkeypatch, tmp_path, capsys):
+    import json as _json
+    from mailbot import wizard as W
+    from mailbot import setup as S
+    from mailbot import config as C
+
+    monkeypatch.setattr(C, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(S, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(W, "config_dir", lambda: tmp_path / "cfg")
+    for k in ("ROUTER_API_KEY", "ROUTER_BASE_URL", "ROUTER_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+
+    class Args:
+        step = "provider"
+        non_interactive = True
+        yes = True
+        fast = False
+        dry_run = False
+        import_env = False
+        skip_voice = True
+        skip_service = True
+
+    assert W.cmd_setup(Args(), C.load()) == 1
+    out = capsys.readouterr().out
+    assert "password your AI provider" in out
+    assert "export ROUTER_API_KEY=" in out
+    assert "Next:" in out
