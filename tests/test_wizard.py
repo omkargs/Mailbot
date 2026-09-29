@@ -360,6 +360,10 @@ def _wire(monkeypatch, tmp_path, probe_ok):
     monkeypatch.setattr(W, "collect_credentials_json", lambda p: True)
     monkeypatch.setattr(W, "headless_google_auth", lambda *a, **k: True)
     monkeypatch.setattr(W, "_test_notify", lambda which: True)
+    # getpass cannot read a terminal under pytest; blank means "give up",
+    # which is the safe default for tests that are not about the key.
+    import getpass
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "")
     return calls
 
 
@@ -433,3 +437,60 @@ def test_explicit_step_provider_always_offers_the_picker(monkeypatch, tmp_path):
 
     W.cmd_setup(_setup_args(step="provider"), C.load())
     assert opened, "--step provider must show the picker even when it works"
+
+
+def test_rejected_key_offers_a_replacement(monkeypatch, tmp_path, capsys):
+    """A 401 must be fixable in the wizard, not a dead end.
+
+    This is the reported bug: the key was wrong, the wizard printed
+    "provider FAILED: ... 401" and moved on, and there was nowhere to put
+    a working key short of hand-editing the secrets file.
+    """
+    import getpass
+    from mailbot import wizard as W, setup as S, config as C
+    from mailbot.agent import discovery as D
+
+    _wire(monkeypatch, tmp_path, probe_ok=False)
+
+    asked = []
+
+    def fake_probe(base, key, model, timeout=30.0):
+        asked.append(key)
+        # The pre-flight probe with the bad key fails; the retry with the
+        # new key succeeds. The pre-flight result must be reused, not
+        # re-probed, so exactly two calls happen.
+        good = key == "sk-good"
+        return {"ok": good, "model": model, "said": "OK" if good else "",
+                "error": "" if good else
+                "AuthenticationError: 401 {'message': 'A valid API key is required.'}"}
+
+    monkeypatch.setattr(D, "probe", fake_probe)
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "sk-good")
+
+    W.cmd_setup(_setup_args(step=None), C.load())
+    out = capsys.readouterr().out
+    assert "sk-good" in asked, "the new key was never tried"
+    assert "That key was rejected." in out
+    assert "provider OK" in out
+    # And it was actually persisted.
+    assert S.read_secrets()["ROUTER_API_KEY"] == "sk-good"
+
+
+def test_blank_key_gives_up_without_looping(monkeypatch, tmp_path, capsys):
+    """Blank input must stop, not spin asking forever."""
+    import getpass
+    from mailbot import wizard as W, config as C
+    from mailbot.agent import discovery as D
+
+    _wire(monkeypatch, tmp_path, probe_ok=False)
+    n = []
+    monkeypatch.setattr(D, "probe", lambda *a, **k: (
+        n.append(1), {"ok": False, "model": "m1", "said": "",
+                      "error": "401 unauthorized"})[1])
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "")
+
+    W.cmd_setup(_setup_args(step=None), C.load())
+    out = capsys.readouterr().out
+    assert len(n) == 1, (f"probed {len(n)} times; the pre-flight result must be "
+                        "reused and blank must stop immediately")
+    assert "mail-agent setup --step provider" in out

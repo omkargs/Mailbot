@@ -340,6 +340,43 @@ def _key_help(base: str) -> str:
             "(Bynara: the API-keys page)")
 
 
+def _retry_provider_key(base: str, key: str, model: str, key_help,
+                        err: str = "", attempts: int = 2):
+    """Offer to replace an API key the provider rejected.
+
+    Returns ``(result, key, fixed)``. A rejected key is the single most
+    fixable problem in this wizard, and the wizard is the only place a
+    user can fix it: the old code printed the 401 and moved on, leaving no
+    way to supply a working key short of hand-editing the secrets file.
+    Blank input gives up; a second Ctrl-C stops the run cleanly.
+    """
+    import getpass
+    from .agent import discovery as D
+
+    res = {"ok": False, "error": err, "model": model, "said": ""}
+    for _ in range(attempts):
+        low = (res.get("error") or "").lower()
+        rejected = any(w in low for w in (
+            "401", "403", "unauthorized", "authentication", "invalid",
+            "api key", "permission", "forbidden", "credit", "expired"))
+        print(f"  {'That key was rejected.' if rejected else 'That did not answer.'}")
+        print(f"  {key_help(base)}")
+        try:
+            new = getpass.getpass(
+                "  Working API key (hidden, blank to skip): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return res, key, False
+        if not new:
+            break
+        key = new
+        write_secret("ROUTER_API_KEY", key)
+        res = D.probe(base, key, model)
+        if res["ok"]:
+            return res, key, True
+        print(f"  ! still failing: {res['error'][:160]}")
+    return res, key, False
+
+
 def _run_voice(state: dict) -> None:
     if state.get("google") == "ok":
         try:
@@ -532,6 +569,10 @@ def cmd_setup(args, cfg) -> int:
         probe = D.probe(base, key, model) if key else {"ok": False}
         working = bool(probe.get("ok"))
         probed_model = model      # what we actually asked, not what it echoed
+        # Tracks whether `probe` still describes (base, key, model). Any
+        # change to those three makes it worthless, and re-probing on a
+        # known-bad key just spends the user's time twice.
+        probe_valid = bool(key)
 
         if working and only != "provider":
             print(f"  provider: {base} — working ({model})")
@@ -567,7 +608,7 @@ def cmd_setup(args, cfg) -> int:
                 # A different endpoint means the old verdict means nothing.
                 base = new_base
                 key = s.get("ROUTER_API_KEY", "")
-                probe, working = {"ok": False}, False
+                probe, working, probe_valid = {"ok": False}, False, False
         base = D.normalise_base(base)
         write_secret("ROUTER_BASE_URL", base)
         if not working:
@@ -616,12 +657,13 @@ def cmd_setup(args, cfg) -> int:
 
                     def _try_id(typed: str) -> None:
                         """Save a model id only once the endpoint agrees."""
-                        nonlocal model
+                        nonlocal model, probe_valid
                         if not typed:
                             return
                         chk = D.probe(base, key, typed)
                         if chk["ok"]:
                             model = typed
+                            probe_valid = False
                         else:
                             print(f"  ! that id failed ({chk['error'][:100]}); keeping {model}")
 
@@ -651,10 +693,12 @@ def cmd_setup(args, cfg) -> int:
                     typed = ""
                 if typed:
                     model = typed
+                    probe_valid = False
                     write_secret("ROUTER_MODEL", model)
             # Reuse the verdict from the top of this step when the model
             # has not changed since; otherwise ask again.
-            res = probe if (working and model == probed_model) else D.probe(base, key, model)
+            res = (probe if (probe_valid and model == probed_model)
+                   else D.probe(base, key, model))
             if res["ok"]:
                 if not working:
                     print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
@@ -696,8 +740,23 @@ def cmd_setup(args, cfg) -> int:
                 elif existing_tri:
                     print(f"  triage model: {existing_tri}")
             else:
-                print(f"  ! provider FAILED: {res['error'][:160]}")
                 state["provider"] = "failed"
+                # Give the user a chance to fix it right here. This is the
+                # only place a rejected key can be corrected.
+                if not non_interactive and _tty():
+                    res, key, fixed = _retry_provider_key(
+                        base, key, model, _key_help, res.get("error", ""))
+                    if fixed:
+                        state["provider"] = "ok"
+                        working = True
+                        print(f"  provider OK: {model}")
+                if state["provider"] != "ok":
+                    print(f"  ! provider FAILED: {res['error'][:160]}")
+                    print("  To supply a working key:")
+                    print("    mail-agent setup --step provider")
+                    print("  or, without the wizard:")
+                    print("    export ROUTER_API_KEY='...'; mail-agent setup --import-env")
+                    print(f"  Keys live in {config_dir() / '.secrets'} (mode 600, never echoed).")
                 if non_interactive:
                     _save_state(state)
                     return 1
