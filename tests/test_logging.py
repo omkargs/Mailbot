@@ -31,3 +31,26 @@ def test_numbers_untouched():
     """Redaction must not eat ordinary numbers — that makes logs useless."""
     for msg in ["took 1500 ms", "item 4821 shipped", "3 retries", "meeting at 1400"]:
         assert redact(msg) == msg, f"over-redacted a plain number: {msg}"
+
+
+def test_installed_http_loggers_are_silenced():
+    """Every HTTP client actually installed must resolve to WARNING.
+
+    Regression: anthropic switched httpx -> httpx2, and the old fixed
+    silence list missed it, so 'httpx2: HTTP Request: POST ...' printed
+    into the setup wizard. Hardcoding names drifts; assert on reality.
+    """
+    import logging
+
+    from mailbot import logging_setup
+
+    logging_setup.setup(logging.INFO)
+    roots = {"httpx", "httpx2", "httpcore", "httpcore2", "urllib3",
+             "requests", "googleapiclient", "google", "msal", "anthropic"}
+    for name in list(logging.root.manager.loggerDict):
+        if name.split(".")[0] in roots:
+            lg = logging.getLogger(name)
+            assert lg.getEffectiveLevel() >= logging.WARNING, f"{name} still noisy"
+    # And the not-yet-created ones must be pre-armed.
+    for name in roots:
+        assert logging.getLogger(name).level >= logging.WARNING, name

@@ -132,3 +132,81 @@ Scopes requested (`src/mailbot/providers/gmail.py`): `gmail.modify`,
 | Voice profile slow | Normal (~1 min, reads sent mail). Skip with `--fast`, run `--step voice` later. |
 
 `SETUP_PROMPT.md` holds the raw copy-paste agent block above for convenience.
+
+## Every environment variable
+
+Anything set in your shell is read at runtime and wins over the secrets file
+(`~/.config/mail-agent/.secrets`). `mail-agent setup --import-env` copies
+these into that file so they survive a reboot.
+
+### AI provider
+
+| Key | Default | What it does |
+|---|---|---|
+| `ROUTER_BASE_URL` | `https://router.bynara.id` | Anthropic-compatible endpoint. |
+| `ROUTER_API_KEY` | — | Required. The provider key. |
+| `ROUTER_MODEL` | `combo/claude2mail` | Flagship model for drafting. |
+| `ROUTER_TRIAGE_MODEL` | *(off)* | Cheap model for the triage pass. Empty = flagship does triage, costing more. |
+| `ROUTER_MAX_TOKENS` | `16000` | Max tokens per reply. |
+
+### Google
+
+| Key | Default | What it does |
+|---|---|---|
+| `GOOGLE_CREDENTIALS` | `~/.config/mail-agent/google-credentials.json` | OAuth Desktop client. |
+| `GOOGLE_TOKEN` | `~/.config/mail-agent/google-token.json` | Refreshed token (mode 600). |
+| `GOOGLE_ACCOUNT` | — | The Gmail address. |
+| `GOOGLE_DISPLAY_NAME` | — | Name used in the `From:` header. |
+| `GOOGLE_CALENDAR_ENABLED` | `true` | Calendar read/write. |
+| `GOOGLE_AUTO_SEND` | `false` | Account-level unattended sends. |
+| `GOOGLE_IMAP_HOST` / `_PORT` | `imap.gmail.com` / `993` | IMAP IDLE push listener. |
+| `GOOGLE_IMAP_PASSWORD` | — | App password. Without it, falls back to interval polling. |
+
+### Microsoft 365
+
+| Key | What it does |
+|---|---|
+| `MS_TENANT_ID` / `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | App registration. |
+| `MS_ACCOUNT` / `MS_DISPLAY_NAME` | Identity. |
+| `MS_CALENDAR_ENABLED` / `MS_AUTO_SEND` | Same meaning as Google. |
+
+### Chat channels
+
+| Key | What it does |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram. The only fully interactive channel (chat **and** approvals). |
+| `DISCORD_BOT_TOKEN` / `DISCORD_USER_ID` | Discord. Notify-only — Discord cannot poll button clicks, so approve on Telegram. |
+| `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` | Slack. Notify-only. |
+
+### Agent behaviour
+
+| Key | Default | What it does |
+|---|---|---|
+| `AGENT_SEND_MODE` | `auto` | `auto` (unattended for approved contacts) or `never` (drafts only). `never` is the kill switch. |
+| `AGENT_SCAN_INTERVAL` | `300` | Seconds between scans when not using IMAP IDLE. |
+| `AGENT_DAILY_TOKEN_CAP` | `500000` | Hard daily spend ceiling. |
+| `AGENT_MAX_CALLS_PER_MIN` | `20` | Runaway-loop brake. |
+| `AGENT_BREAKER_THRESHOLD` | `5` | Failures before the circuit opens. |
+| `AGENT_MAX_DRAFTS` | `40` | Cap per run. |
+| `AGENT_BRIEF_HOUR` | `7` | Morning brief, local time. |
+| `AGENT_WARN_SPEND_PCT` | `80` | Warn at this share of the cap. |
+| `MAIL_AGENT_BRAIN` | `./brain` | Where voice profiles live. |
+
+### Escalation keywords
+
+`escalation_keywords` in `~/.config/mail-agent/config.json` decides what always
+stops for your review. Matched three ways — raw text, de-obfuscated (leet,
+zero-width), and spaceless — so `p a s s w o r d` and `p.a.s.s.w.o.r.d` both
+trip it. Adding a word makes the agent more cautious; removing one makes it
+more autonomous.
+
+## Uninstalling
+
+```bash
+./uninstall.sh
+```
+
+Shows where code, config, and data live, then offers: **1)** keep data (removes
+code only — reinstall later with settings intact), **2)** full wipe (requires
+typing `DELETE`), **3)** cancel. It stops the daemon first, and refuses to run
+without a TTY so it can never delete anything unattended.

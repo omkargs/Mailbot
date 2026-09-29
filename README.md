@@ -7,7 +7,7 @@ Runs on your own machine. Answers to Telegram. Works & manages your inbox while 
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-235%20passing-brightgreen.svg)]()
 [![Setup](https://img.shields.io/badge/setup-60s%20wizard-blue.svg)](SETUP.md)
 
 *No dashboard. No plugin. No cloud account. Your mail never leaves your box
@@ -15,10 +15,19 @@ except to the model endpoint you choose.*
 
 </div>
 
+> **Requires Python 3.11+.** Check with `python3 -V` first — Ubuntu 22.04
+> ships 3.10, which will not work. `./setup.sh` finds a 3.11+ for you
+> automatically.
+>
 > **Try the whole idea in 10 seconds, no Gmail needed:**
 > ```bash
 > git clone https://github.com/omkargs/Mailbot && cd Mailbot
-> python3 -m venv .venv && .venv/bin/pip install -q -e . && .venv/bin/mail-agent demo
+> ./setup.sh --fast --step provider   # picks a valid Python, then stops
+> .venv/bin/mail-agent demo
+> ```
+> Or if you already have Python 3.11+ on PATH, skip straight to the demo:
+> ```bash
+> python3.11 -m venv .venv && .venv/bin/pip install -q -e . && .venv/bin/mail-agent demo
 > ```
 > Five fake emails. Watch it send one, file one, and refuse three — with reasons.
 > Then `./setup.sh --fast` points it at your real inbox. Full guide: **[SETUP.md](SETUP.md)**.
@@ -159,13 +168,21 @@ mail-agent reset --yes # wipe its memory, keep your credentials
 
 ## Where your data goes
 
-**Nowhere, except to the AI provider you choose.** That's the whole list:
+**Nowhere, except the AI provider you choose.** That's the whole list:
 
 - Your mail is read directly from Gmail over your own OAuth token.
 - Message text is sent to your configured model endpoint to be triaged. Choose
   a local model if you want that to stay on your machine too.
-- Nothing is written to any third-party service. No telemetry, no analytics,
-  no account, no phone-home.
+- No telemetry, no analytics, no account, no phone-home. Mailbot has no
+  servers of its own to send anything to.
+
+**One thing worth stating plainly:** the default provider is
+`router.bynara.id`, an Anthropic-compatible router **maintained by this
+project's author**. It is not a neutral default, and if you would rather not
+route your mail through the maintainer, say so at the first prompt and pick
+Anthropic direct, OpenRouter, or a local model instead — that choice is
+offered before anything is saved, and the default is a convenience, not a
+requirement.
 
 Secrets live in `~/.config/mail-agent/.secrets` at mode `600`. They are never
 logged, never echoed, and never committed.

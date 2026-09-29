@@ -464,8 +464,15 @@ def cmd_setup(args, cfg) -> int:
     skip_service = bool(getattr(args, "skip_service", False)) or fast
     state = _load_state()
     if state and not only:
-        done = ", ".join(f"{k}={v}" for k, v in sorted(state.items()))
-        print(f"  Resuming — already done: {done}")
+        # A failed step is not "already done". Labelling provider=failed as
+        # completed made a broken install look resumable-and-fine; it only
+        # recovered because every step re-verifies. Separate the three.
+        done = sorted(k for k, v in state.items() if v == "ok")
+        failed = sorted(k for k, v in state.items() if str(v).startswith(("failed", "missing", "partial")))
+        if done:
+            print(f"  Resuming — already done: {', '.join(done)}")
+        if failed:
+            print(f"  Still needs you: {', '.join(failed)} (will retry)")
 
     # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
     # add-inbox is standalone: a full run never invents inboxes.
@@ -550,7 +557,15 @@ def cmd_setup(args, cfg) -> int:
                 import getpass
                 try:
                     key = getpass.getpass("  Router API key (hidden): ").strip()
-                except (EOFError, KeyboardInterrupt):
+                except KeyboardInterrupt:
+                    # Ctrl-C means "stop", not "skip this field". Swallowing it
+                    # marched the user through the whole wizard with a blank
+                    # key and buried them in the Google step.
+                    print("\n  stopped. nothing was half-written — re-run "
+                          "`mail-agent setup` when ready.")
+                    _save_state(state)
+                    return 130
+                except EOFError:
                     key = ""
                 if key:
                     write_secret("ROUTER_API_KEY", key)
@@ -882,8 +897,17 @@ def cmd_doctor(args, cfg) -> int:
 
     problems = 0
 
-    def check(name: str, ok: bool, hint: str = ""):
+    def check(name: str, ok: bool, hint: str = "", required: bool = True):
+        """required=False marks an optional integration.
+
+        Optional items got the same red ✘ as real failures, so a perfectly
+        healthy install that simply has no Telegram looked broken. They now
+        get a neutral glyph and never affect the exit code.
+        """
         nonlocal problems
+        if not ok and not required:
+            print(f"  · {name} — {hint or 'not set (optional)'}")
+            return
         print(f"  {'✔' if ok else '✘'} {name}" + ("" if ok else f" — {hint}"))
         if not ok:
             problems += 1
@@ -917,7 +941,7 @@ def cmd_doctor(args, cfg) -> int:
         check("google provider loads", False, f"{type(e).__name__}")
     check("telegram configured",
           bool(s.get("TELEGRAM_BOT_TOKEN") and s.get("TELEGRAM_CHAT_ID")),
-          "optional — mail-agent setup --step chat")
+          "optional — mail-agent setup --step chat", required=False)
     try:
         from .storage import db
 

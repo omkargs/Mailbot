@@ -77,10 +77,20 @@ else
   BOLD=''; DIM=''; GRN=''; YLW=''; RST=''
 fi
 
-say()  { printf '%s\n' "$*"; _log "say: $*" 2>/dev/null || true; }
-ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; _log "ok: $*" 2>/dev/null || true; }
-warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; _log "warn: $*" 2>/dev/null || true; }
-die()  { printf '%s✘ %s%s\n' "$RST" "$*" "$RST"; exit 1; }
+# Log a line, stripped of colour. A log full of escape codes is unreadable
+# in less/grep, which is the only reason it exists.
+_strip_ansi() { printf '%s' "$1" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
+
+say()  { printf '%s\n' "$*"; _log "$(_strip_ansi "$*")" 2>/dev/null || true; }
+ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; _log "$(_strip_ansi "✔ $*")" 2>/dev/null || true; }
+warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; _log "$(_strip_ansi "! $*")" 2>/dev/null || true; }
+die()  {
+  printf '%s✘ %s%s\n' "$RST" "$1" "$RST"
+  shift
+  [ $# -gt 0 ] && printf '%s\n' "$@"
+  _log "FATAL: $1" 2>/dev/null || true
+  exit 1
+}
 
 # Pick a Python >= 3.11, self-healing. Tries, in order:
 #   1. python3.13 / 3.12 / 3.11 / 3 on PATH
@@ -91,6 +101,14 @@ pick_python() {
   local c v
   for c in python3.13 python3.12 python3.11 python3; do
     if command -v "$c" >/dev/null 2>&1; then
+      # Reject prereleases. `command -v python3.11` happily matches
+      # 3.11.0rc1, and an rc build is not what a stranger should be handed
+      # when they are already hitting friction in the first 60 seconds.
+      case "$("$c" --version 2>&1)" in
+        *rc*|*alpha*|*beta*|*dev*|*'+'*)
+          warn "skipping $c ($("$c" --version 2>&1)) — prerelease build"
+          continue ;;
+      esac
       v="$("$c" -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null | tr -cd '0-9')"
       if [ "${v:-0}" -ge 311 ] 2>/dev/null; then
         printf '%s' "$c"
@@ -142,7 +160,28 @@ pip_install() {
   "$1/bin/pip" install "${@:2}" $_q
 }
 
+# Network preflight. pip failing on DNS prints 40 lines of urllib3 noise and
+# looks like a broken repo. Check first and say what is actually wrong.
+check_network() {
+  command -v git >/dev/null 2>&1 || return 0
+  git ls-remote --exit-code -h https://github.com/omkargs/Mailbot.git HEAD >/dev/null 2>&1 && return 0
+  # git can fail for a proxy/auth reason rather than DNS. Only treat a clear
+  # resolution failure as "offline" so a proxy setup is never mislabelled.
+  local out
+  out="$(git ls-remote https://github.com/omkargs/Mailbot.git HEAD 2>&1 || true)"
+  case "$out" in
+    *"Could not resolve host"*|*"Temporary failure in name resolution"*|*"Failed to connect to github.com"*)
+      die "No network to GitHub — everything below needs it (pip, uv, provider).
+    Check: can you open https://github.com in a browser?
+    Behind a proxy? export HTTPS_PROXY=http://host:port and re-run.
+    Already have the code and a wheelhouse? pip install --no-index -e ."
+      ;;
+  esac
+  return 0
+}
+
 PY=""
+check_network
 if ! PY="$(pick_python)"; then
   die "No Python 3.11+ and none installable automatically.
 
@@ -279,7 +318,19 @@ if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
     # Re-runs are instant: a working venv is reused. Pass --reinstall to force.
     if [ "$DO_REINSTALL" = true ] || ! "$VENV/bin/python" -c "import mailbot" >/dev/null 2>&1; then
       say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
-      pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
+      _log "==> pip install -e $REPO $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      if ! pip_install "$VENV" -e "$REPO"; then
+        if [ "${VERBOSE:-false}" != true ]; then
+          # quiet mode swallowed the useful part. Repeat verbose so the real
+          # error is on screen, not just the one-line summary.
+          warn "install failed — re-running with full output for the real error"
+          VERBOSE=true
+          pip_install "$VENV" -e "$REPO" || true
+        fi
+        die "could not install mailbot into $VENV
+    Full log: $INSTALL_LOG
+    Common causes: no network (see above), or a proxy needing HTTPS_PROXY."
+      fi
     else
       say "${DIM}Reusing the existing install (pass --reinstall to force)…${RST}"
     fi

@@ -71,5 +71,19 @@ def setup(level: int = logging.INFO, logfile: str | Path | None = None) -> None:
         root.addHandler(fh)
 
     # Third-party loggers are noisy and can echo request bodies.
-    for noisy in ("httpx", "httpcore", "urllib3", "googleapiclient", "google.auth", "msal"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    #
+    # Match by prefix over what is ACTUALLY installed, not a hardcoded list.
+    # anthropic moved from httpx to httpx2, so the old fixed list silenced two
+    # libraries that make no requests while leaving the two that do fully
+    # verbose — and "httpx2: HTTP Request: POST ..." printed into the middle
+    # of the setup wizard. Hardcoded names will drift again; this cannot.
+    _NOISY_ROOTS = {
+        "httpx", "httpx2", "httpcore", "httpcore2", "urllib3", "requests",
+        "googleapiclient", "google", "msal", "anthropic", "mcp", "openai",
+    }
+    for name in list(logging.root.manager.loggerDict):
+        if name.split(".")[0] in _NOISY_ROOTS:
+            logging.getLogger(name).setLevel(logging.WARNING)
+    # Names not yet instantiated will be created at import; catch those too.
+    for name in _NOISY_ROOTS:
+        logging.getLogger(name).setLevel(logging.WARNING)

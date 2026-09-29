@@ -11,7 +11,11 @@ VENV="$REPO/.venv"
 CLI="$VENV/bin/mail-agent"
 UNIT="mail-agent.service"
 
-BOLD=$'\033[1m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  BOLD=$'\033[1m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+else
+  BOLD=''; GRN=''; YLW=''; RST=''
+fi
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; }
 warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; }

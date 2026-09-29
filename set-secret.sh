@@ -12,7 +12,11 @@ set -uo pipefail
 
 CONFIG_DIR="${MAIL_AGENT_CONFIG_DIR:-$HOME/.config/mail-agent}"
 SECRETS="$CONFIG_DIR/.secrets"
-BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+else
+  BOLD=''; DIM=''; GRN=''; YLW=''; RST=''
+fi
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; }
 warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; }

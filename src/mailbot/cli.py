@@ -142,6 +142,15 @@ def cmd_voice(args, cfg):
 
 
 def cmd_brief(args, cfg):
+    # Honesty guard. With no connected account this used to print
+    # "**Needs you:** nothing. Inbox handled." and exit 0 — a silent agent
+    # and a broken one look identical from outside, which is the one thing
+    # this project claims not to be. cmd_approve already guards this way.
+    providers = _providers(cfg)
+    if not providers:
+        print("No authenticated account — there is no inbox to brief.")
+        print("Run: mail-agent setup --step google")
+        return 1
     notifier = build_notifiers(cfg)
     text = brief_mod.build_brief(cfg)
     print(text)
@@ -151,6 +160,9 @@ def cmd_brief(args, cfg):
 
 
 def cmd_quiet(args, cfg):
+    if not _providers(cfg):
+        print("No authenticated account — nothing to review.")
+        return 1
     text = brief_mod.brief_quiet_threads(cfg)
     print(text)
     notifier = build_notifiers(cfg)
