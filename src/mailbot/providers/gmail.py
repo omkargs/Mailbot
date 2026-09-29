@@ -219,7 +219,8 @@ class GmailProvider(MailProvider):
             "size_bytes": m.get("sizeEstimate", 0),
         }
 
-    def list_messages(self, folder: str = "INBOX", limit: int = 20, after_id: str | None = None) -> list[dict[str, Any]]:
+    def list_messages(self, folder: str = "INBOX", limit: int = 20, after_id: str | None = None,
+                      newer_than_days: int = 0) -> list[dict[str, Any]]:
         """Newest first. `after_id` is an exclusive high-water mark.
 
         A hardcoded date window here would silently drop mail older than the
@@ -236,6 +237,10 @@ class GmailProvider(MailProvider):
             "SPAM": "in:spam", "TRASH": "in:trash", "STARRED": "is:starred",
         }
         q = folder_map.get(folder.upper(), f'in:{folder.lower()}')
+        if newer_than_days and not after_id:
+            # First run only. With a cursor this would drop old mail that
+            # arrived while the agent was down, so it stays off.
+            q = f"{q} newer_than:{int(newer_than_days)}d"
         res = svc.users().messages().list(userId="me", q=q, maxResults=limit).execute()
         refs = res.get("messages", [])[:limit]
         if not refs:

@@ -702,6 +702,18 @@ def main() -> int:
     _db.migrate()
 
     cfg = config.load()
+    # Load the spend limits for EVERY entry point, not just the daemon.
+    # from_config() was only ever called by the supervisor, so `mail-agent
+    # scan`, `brief`, `brain`, `voice` and the approval flow all ran
+    # against the hardcoded 500k default and ignored
+    # AGENT_DAILY_TOKEN_CAP entirely. The README presents these as limits
+    # that are "on by default"; for anyone driving the agent from cron or
+    # a terminal, two of the four were decorative.
+    try:
+        from .limits import from_config as _limits_from_config
+        _limits_from_config(cfg)
+    except Exception:
+        pass
     try:
         return args.fn(args, cfg)
     except KeyboardInterrupt:

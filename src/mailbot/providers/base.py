@@ -69,9 +69,17 @@ class MailProvider(abc.ABC):
     # ---------------------------------------------------------------- read
     @abc.abstractmethod
     def list_messages(
-        self, folder: str = "INBOX", limit: int = 20, after_id: str | None = None
+        self, folder: str = "INBOX", limit: int = 20, after_id: str | None = None,
+        newer_than_days: int = 0,
     ) -> list[dict[str, Any]]:
-        """Newest first. `after_id` is an exclusive high-water mark."""
+        """Newest first. `after_id` is an exclusive high-water mark.
+
+        `newer_than_days` is only ever set on a first run, where there is no
+        cursor and "everything ever" would mean the whole mailbox. Once a
+        cursor exists it must stay 0: a window there would silently drop
+        mail older than the window that arrived while the agent was down.
+        Providers that cannot express it may ignore it.
+        """
 
     @abc.abstractmethod
     def get_message(self, message_id: str) -> dict[str, Any] | None:

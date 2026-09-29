@@ -198,9 +198,17 @@ class GraphProvider(MailProvider):
             "size_bytes": m.get("size", 0),
         }
 
-    def list_messages(self, folder: str = INBOX, limit: int = 20, after_id: str | None = None) -> list[dict[str, Any]]:
+    def list_messages(self, folder: str = INBOX, limit: int = 20, after_id: str | None = None,
+                      newer_than_days: int = 0) -> list[dict[str, Any]]:
+        from datetime import datetime, timedelta, timezone
         sel = "from,subject,bodyPreview,receivedDateTime,from,toRecipients,conversationId,hasAttachments,parentFolderId"
-        data = self._get(f"/me/mailFolders/{folder}/messages", top=limit, select=sel, orderby="receivedDateTime desc")
+        filt = ""
+        if newer_than_days and not after_id:
+            # Graph wants an ISO instant, not "7d". First run only.
+            since = (datetime.now(timezone.utc)
+                     - timedelta(days=int(newer_than_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+            filt = f"$filter=receivedDateTime ge {since}&"
+        data = self._get(f"/me/mailFolders/{folder}/messages?{filt}", top=limit, select=sel, orderby="receivedDateTime desc")
         out = [self._norm(m) for m in data.get("value", [])]
         if after_id:
             ids = [m["id"] for m in out]

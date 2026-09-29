@@ -224,7 +224,7 @@ def test_successful_run_advances_cursor(provider, cfg, mock_router):
     assert out["status"] == "ok"
     assert db.count_unprocessed("google") == 0
 
-    runner.advance_cursor(provider)
+    runner.advance_cursor(provider, [m["id"] for m in new])
     assert db.get_cursor("google", "inbox") is not None
 
 
@@ -246,3 +246,119 @@ def test_iteration_limit_leaves_mail_unprocessed(provider, cfg, mock_router):
 
     assert out["status"] != "ok", "an unfinished run must not report ok"
     assert db.count_unprocessed("google") == 1, "unfinished mail must be retried"
+
+
+def test_cursor_never_advances_past_unprocessed_mail(provider, cfg, mock_router):
+    """A crashed run must not orphan its mail. Regression.
+
+    advance_cursor used to jump to the newest message in the whole account
+    by date, not the newest this run processed. Run A fetches 30 and dies
+    with 22 unprocessed; run B then jumps past those 22 and they are never
+    fetched again - silent, permanent mail loss with a manual-SQL fix.
+    """
+    from mailbot.agent import runner
+
+    # A run that fetched 30 messages and only processed 8.
+    fetched = []
+    for i in range(30):
+        m = provider.add_message(sender=f"s{i}@corp.com", subject=f"S{i}",
+                                body=f"body {i}")
+        fetched.append(m["id"])
+    # Pretend a later, successful run handled only 8 of them.
+    handled = fetched[:8]
+    for mid in handled:
+        db.upsert_message({"id": mid, "account": "google", "from": "x@corp.com",
+                           "subject": "s", "date": "2024-01-01"})
+        with db.db() as c:
+            c.execute("UPDATE messages SET processed_at=? WHERE id=?",
+                      ("2024-01-02T00:00:00Z", mid))
+
+    runner.advance_cursor(provider, handled)
+    cursor = db.get_cursor("google", "inbox")
+    assert cursor in handled, f"cursor jumped to {cursor}, outside this run"
+
+
+def test_advance_cursor_with_no_ids_does_nothing(provider):
+    """No ids means no evidence. Never guess a position."""
+    from mailbot.agent import runner
+
+    provider.add_message(sender="a@b.com", subject="s", body="b")
+    runner.fetch_new(provider)
+    before = db.get_cursor("google", "inbox")
+    runner.advance_cursor(provider, [])
+    runner.advance_cursor(provider, None)
+    assert db.get_cursor("google", "inbox") == before
+
+
+def test_a_crashed_run_records_an_outcome(provider, cfg, mock_router):
+    """A run that dies must not leave status NULL with an empty error.
+
+    Anything that retries on NULL would retry a run that already did
+    partial work, and a reader of the runs table would see a run that
+    neither succeeded nor failed.
+    """
+    from mailbot.agent import runner
+
+    provider.add_message(sender="boss@corp.com", subject="Hi", body="Hello")
+    new = runner.fetch_new(provider)
+
+    def boom(*a, **k):
+        raise RuntimeError("the model call exploded")
+
+    original = runner.guarded_call
+    runner.guarded_call = boom
+    try:
+        out = runner.run_once("google", provider, cfg, messages=new)
+    finally:
+        runner.guarded_call = original
+
+    assert out["status"] == "error"
+    with db.db() as c:
+        row = c.execute(
+            "SELECT status, error FROM runs WHERE id=?", (out["run_id"],)).fetchone()
+    assert row["status"] == "error"
+    assert row["error"], "an error run with an empty error is the bug"
+    # And the mail is still there to retry.
+    assert db.count_unprocessed("google") == 1
+
+
+def test_first_run_only_touches_recent_mail(provider, cfg, mock_router):
+    """The first run must not sweep two years of history.
+
+    Reported: the first scan archived 2024 mail, because with no cursor
+    "everything after nothing" is the entire mailbox.
+    """
+    from mailbot.agent import runner
+
+    old = provider.add_message(sender="archive@corp.com", subject="2019 tax",
+                               body="ancient", date="2019-04-01T00:00:00Z")
+    recent = provider.add_message(sender="boss@corp.com", subject="Standup",
+                                  body="now", date="2099-01-01T00:00:00Z")
+
+    got = runner.fetch_new(provider, cfg=cfg)
+    ids = [m["id"] for m in got]
+    assert old["id"] not in ids, "first run reached mail older than the window"
+    assert recent["id"] in ids
+
+
+def test_window_drops_once_a_cursor_exists(provider, cfg, mock_router):
+    """With a cursor the window must vanish, or old mail is silently lost."""
+    from mailbot.agent import runner
+
+    old = provider.add_message(sender="archive@corp.com", subject="2019 tax",
+                               body="ancient", date="2019-04-01T00:00:00Z")
+    db.set_cursor("google", "inbox", "some-earlier-id")
+
+    got = runner.fetch_new(provider, cfg=cfg)
+    assert old["id"] in [m["id"] for m in got]
+
+
+def test_fetch_volume_is_configurable(provider, cfg, mock_router):
+    """30 messages and 12 bodies were hardcoded with no way to tune them."""
+    from mailbot.agent import runner
+
+    for i in range(10):
+        provider.add_message(sender=f"s{i}@corp.com", subject=f"S{i}", body="b")
+
+    cfg.agent.fetch_limit = 3
+    assert len(runner.fetch_new(provider, cfg=cfg)) == 3

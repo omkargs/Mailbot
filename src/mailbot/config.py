@@ -184,6 +184,16 @@ class AgentConfig:
     breaker_threshold: int = field(default_factory=lambda: int(_v("AGENT_BREAKER_THRESHOLD", "5")))
     warn_spend_pct: int = field(default_factory=lambda: int(_v("AGENT_WARN_SPEND_PCT", "80")))
     max_drafts_per_run: int = field(default_factory=lambda: int(_v("AGENT_MAX_DRAFTS", "40")))
+    # How much mail one run pulls in, and how many full bodies ride along in
+    # the prompt. These were hardcoded to 30 and 12 with no relationship to
+    # any timeout, so a slow or local provider could not finish a single run
+    # and the user had no way to tune it without editing source.
+    fetch_limit: int = field(default_factory=lambda: int(_v("AGENT_FETCH_LIMIT", "30")))
+    body_prefetch: int = field(default_factory=lambda: int(_v("AGENT_BODY_PREFETCH", "12")))
+    # On the very first run there is no cursor, so the agent would otherwise
+    # sweep the entire mailbox and archive two years of history on its first
+    # breath. Its first action on a real inbox should be near-invisible.
+    first_run_days: int = field(default_factory=lambda: int(_v("AGENT_FIRST_RUN_DAYS", "7")))
     scan_interval_sec: int = field(default_factory=lambda: int(_v("AGENT_SCAN_INTERVAL", "300")))
     brief_hour: int = field(default_factory=lambda: int(_v("AGENT_BRIEF_HOUR", "7")))
     enabled_accounts: list[str] = field(default_factory=lambda: cfg().get("enabled_accounts", []))

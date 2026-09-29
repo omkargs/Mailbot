@@ -92,163 +92,208 @@ def run_once(
         return {"status": "capped"}
 
     run_id = db.start_run(account, trigger, model or cfg.router.model)
-    client = build_client(cfg.router)
-    # Email-driven: standing authority changes are refused in this context.
-    box = ToolBox(provider, cfg, run_id, notify=notify,
-                  allow_permission_change=False, profile=profile)
+    # A run that dies must say so. It used to leave status NULL with an
+    # empty error, so the runs table held a run that had neither
+    # succeeded nor failed - and anything that retries on NULL would
+    # retry a run that already did partial work.
+    try:
+        client = build_client(cfg.router)
+        # Email-driven: standing authority changes are refused in this context.
+        box = ToolBox(provider, cfg, run_id, notify=notify,
+                      allow_permission_change=False, profile=profile)
 
-    pending = messages if messages is not None else db.unprocessed(account, limit=cfg.agent.max_drafts_per_run)
-    if not pending:
-        db.finish_run(run_id, status="ok")
-        return {"status": "empty", "run_id": run_id}
+        pending = messages if messages is not None else db.unprocessed(account, limit=cfg.agent.max_drafts_per_run)
+        if not pending:
+            db.finish_run(run_id, status="ok")
+            return {"status": "empty", "run_id": run_id}
 
-    # Cheap triage pass first: a small model sorts, IGNOREs get archived
-    # here, and the flagship only ever sees what matters. Any failure falls
-    # back to the full flagship pass — mail is never dropped to save money.
-    if triage.wanted(cfg):
-        try:
-            verdicts = triage.classify(pending[:12], cfg)
-            pending, _archived = triage.prune(pending, verdicts, cfg, provider, box)
-        except Exception as e:
-            log.warning("triage pass failed (%s); full flagship pass", type(e).__name__)
-    if not pending:
-        db.finish_run(run_id, triaged=box.stats["triaged"],
-                      input_tokens=0, output_tokens=0, status="ok")
-        n = box.stats["triaged"]
-        return {"status": "ok", "run_id": run_id,
-                "summary": f"Filed {n} newsletter(s) — nothing needs you.",
-                "stats": box.stats,
-                "usage": {"input_tokens": 0, "output_tokens": 0,
-                          "cache_read": 0, "cache_write": 0}}
+        # Cheap triage pass first: a small model sorts, IGNOREs get archived
+        # here, and the flagship only ever sees what matters. Any failure falls
+        # back to the full flagship pass — mail is never dropped to save money.
+        if triage.wanted(cfg):
+            try:
+                verdicts = triage.classify(pending[:12], cfg)
+                pending, _archived = triage.prune(pending, verdicts, cfg, provider, box)
+            except Exception as e:
+                log.warning("triage pass failed (%s); full flagship pass", type(e).__name__)
+        if not pending:
+            db.finish_run(run_id, triaged=box.stats["triaged"],
+                          input_tokens=0, output_tokens=0, status="ok")
+            n = box.stats["triaged"]
+            return {"status": "ok", "run_id": run_id,
+                    "summary": f"Filed {n} newsletter(s) — nothing needs you.",
+                    "stats": box.stats,
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_read": 0, "cache_write": 0}}
 
-    system = _system_blocks(build_prompt(account, cfg))
+        system = _system_blocks(build_prompt(account, cfg))
 
-    # Volatile context lives here, after the last cache breakpoint.
-    # Bodies come with the listing. Without them the model calls get_message
-    # once per message, and each of those is a sequential round trip.
-    ctx = ["# Per-run context", f"New messages awaiting triage: {len(pending)}", ""]
-    ctx.append("Full bodies are included so you do not need to fetch them one by one.")
-    ctx.append("")
-    for m in pending[:12]:
-        body = (m.get("body") or "").strip()
-        # Sender and subject are attacker-controlled. A subject like "ignore
-        # previous instructions" sitting outside the fence reads as an
-        # instruction; inside, it reads as data.
-        ctx.append(guards.fence(
-            f"from: {m['sender']}  date: {m.get('date', '')}\n"
-            f"subject: {m.get('subject', '')[:120]}", "headers"))
-        if "_triage" in m:
-            ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
-        if body:
-            ctx.append(guards.fence(body[:1500], "body"))
-        else:
-            ctx.append(guards.fence((m.get("snippet") or "")[:300], "snippet"))
-        ctx.append(f"message id: {m['id']}")
+        # Volatile context lives here, after the last cache breakpoint.
+        # Bodies come with the listing. Without them the model calls get_message
+        # once per message, and each of those is a sequential round trip.
+        ctx = ["# Per-run context", f"New messages awaiting triage: {len(pending)}", ""]
+        ctx.append("Full bodies are included so you do not need to fetch them one by one.")
         ctx.append("")
+        for m in pending[:12]:
+            body = (m.get("body") or "").strip()
+            # Sender and subject are attacker-controlled. A subject like "ignore
+            # previous instructions" sitting outside the fence reads as an
+            # instruction; inside, it reads as data.
+            ctx.append(guards.fence(
+                f"from: {m['sender']}  date: {m.get('date', '')}\n"
+                f"subject: {m.get('subject', '')[:120]}", "headers"))
+            if "_triage" in m:
+                ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
+            if body:
+                ctx.append(guards.fence(body[:1500], "body"))
+            else:
+                ctx.append(guards.fence((m.get("snippet") or "")[:300], "snippet"))
+            ctx.append(f"message id: {m['id']}")
+            ctx.append("")
 
-    listed, unlisted = pending[:12], pending[12:]
-    if unlisted:
-        ctx.append("Not yet read, ids only — fetch in one batched get_message call:")
-        ctx.append(", ".join(m["id"] for m in unlisted[:18]))
+        listed, unlisted = pending[:12], pending[12:]
+        if unlisted:
+            ctx.append("Not yet read, ids only — fetch in one batched get_message call:")
+            ctx.append(", ".join(m["id"] for m in unlisted[:18]))
 
-    ctx.append(
-        "\nDecide for each: triage it, reply where a reply is genuinely warranted, "
-        "or escalate. Batch your work — pass several ids to one get_message call."
-    )
-
-    messages_param: list[dict[str, Any]] = [{"role": "user", "content": "\n".join(ctx)}]
-    totals = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0}
-    final_text = ""
-
-    completed = False
-    for _ in range(MAX_ITERATIONS):
-        resp = guarded_call(client, 
-            model=model or cfg.router.model,
-            max_tokens=cfg.router.max_tokens,
-            system=system,
-            tools=_cached_tool_list(),
-            messages=messages_param,
-        )
-        refusal = handle_refusal(resp)
-        if refusal:
-            log.warning("refusal: %s", refusal)
-            final_text = refusal
-            break
-
-        for k, v in usage_to_dict(resp.usage).items():
-            totals[k] += v
-        db.record_usage(
-            usage_to_dict(resp.usage)["input_tokens"],
-            usage_to_dict(resp.usage)["output_tokens"],
-            usage_to_dict(resp.usage)["cache_read"],
-            usage_to_dict(resp.usage)["cache_write"],
+        ctx.append(
+            "\nDecide for each: triage it, reply where a reply is genuinely warranted, "
+            "or escalate. Batch your work — pass several ids to one get_message call."
         )
 
-        messages_param.append({"role": "assistant", "content": resp.content})
+        messages_param: list[dict[str, Any]] = [{"role": "user", "content": "\n".join(ctx)}]
+        totals = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0}
+        final_text = ""
 
-        if resp.stop_reason != "tool_use":
-            final_text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-            completed = True
-            break
+        completed = False
+        for _ in range(MAX_ITERATIONS):
+            resp = guarded_call(client, 
+                model=model or cfg.router.model,
+                max_tokens=cfg.router.max_tokens,
+                system=system,
+                tools=_cached_tool_list(),
+                messages=messages_param,
+            )
+            refusal = handle_refusal(resp)
+            if refusal:
+                log.warning("refusal: %s", refusal)
+                final_text = refusal
+                break
 
-        results = []
-        for block in resp.content:
-            if getattr(block, "type", "") != "tool_use":
-                continue
-            out = box.run(block.name, block.input)
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": json.dumps(out, default=str)[:8000],
-                "is_error": not out.get("ok", True),
-            })
-        if not results:
-            completed = True
-            break
-        messages_param.append({"role": "user", "content": results})
-    else:
-        # Hit MAX_ITERATIONS without finishing. Do not mark anything processed —
-        # the next cycle should retry rather than silently drop the mail.
-        log.warning("agent hit MAX_ITERATIONS (%d); messages left unprocessed", MAX_ITERATIONS)
-        final_text = "stopped: iteration limit reached, mail left for the next run"
+            for k, v in usage_to_dict(resp.usage).items():
+                totals[k] += v
+            db.record_usage(
+                usage_to_dict(resp.usage)["input_tokens"],
+                usage_to_dict(resp.usage)["output_tokens"],
+                usage_to_dict(resp.usage)["cache_read"],
+                usage_to_dict(resp.usage)["cache_write"],
+            )
 
-    if completed:
-        for m in pending:
-            db.mark_processed(m["id"])
-    else:
-        log.info("not marking %d message(s) processed; they will be retried", len(pending))
+            messages_param.append({"role": "assistant", "content": resp.content})
 
-    db.finish_run(
-        run_id,
-        new_messages=len(pending),
-        triaged=box.stats["triaged"],
-        drafted=box.stats["drafted"],
-        sent=box.stats["sent"],
-        escalated=box.stats["escalated"],
-        input_tokens=totals["input_tokens"],
-        output_tokens=totals["output_tokens"],
-        cache_read=totals["cache_read"],
-        cache_write=totals["cache_write"],
-        status="ok" if completed else "incomplete",
-    )
-    return {
-        "status": "ok" if completed else "incomplete",
-        "run_id": run_id,
-        "summary": final_text,
-        "stats": box.stats,
-        "usage": totals,
-    }
+            if resp.stop_reason != "tool_use":
+                final_text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+                completed = True
+                break
+
+            results = []
+            for block in resp.content:
+                if getattr(block, "type", "") != "tool_use":
+                    continue
+                out = box.run(block.name, block.input)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(out, default=str)[:8000],
+                    "is_error": not out.get("ok", True),
+                })
+            if not results:
+                completed = True
+                break
+            messages_param.append({"role": "user", "content": results})
+        else:
+            # Hit MAX_ITERATIONS without finishing. Do not mark anything processed —
+            # the next cycle should retry rather than silently drop the mail.
+            log.warning("agent hit MAX_ITERATIONS (%d); messages left unprocessed", MAX_ITERATIONS)
+            final_text = "stopped: iteration limit reached, mail left for the next run"
+
+        if completed:
+            for m in pending:
+                db.mark_processed(m["id"])
+        else:
+            log.info("not marking %d message(s) processed; they will be retried", len(pending))
+
+        db.finish_run(
+            run_id,
+            new_messages=len(pending),
+            triaged=box.stats["triaged"],
+            drafted=box.stats["drafted"],
+            sent=box.stats["sent"],
+            escalated=box.stats["escalated"],
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            cache_read=totals["cache_read"],
+            cache_write=totals["cache_write"],
+            status="ok" if completed else "incomplete",
+        )
+        return {
+            "status": "ok" if completed else "incomplete",
+            "run_id": run_id,
+            "summary": final_text,
+            "stats": box.stats,
+            "usage": totals,
+        }
+    except Exception as e:
+        # Record what went wrong rather than letting the traceback be the
+        # only record. The stored message is the exception type plus a
+        # short prefix: a failed model call carries the whole prompt, and
+        # the prompt carries attacker-controlled email bodies.
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        log.error("run %s failed: %s", run_id, type(e).__name__)
+        try:
+            db.finish_run(run_id, status="error", error=err)
+        except Exception:
+            pass
+        return {"status": "error", "run_id": run_id, "summary": err}
+    finally:
+        try:
+            with db.db() as c:
+                row = c.execute("SELECT status FROM runs WHERE id=?",
+                                 (run_id,)).fetchone()
+            if row and not row["status"]:
+                db.finish_run(run_id, status="error",
+                              error="run aborted before completion")
+        except Exception:
+            pass
 
 
-def fetch_new(provider: MailProvider, limit: int = 30) -> list[dict[str, Any]]:
+def fetch_new(provider: MailProvider, limit: int = 0, cfg: Config | None = None) -> list[dict[str, Any]]:
     """Pull new mail into the store, honouring the per-stream cursor.
 
     The cursor is only advanced by advance_cursor(), after a successful run —
     never here. Advancing on fetch would mark mail as seen even if the agent
     run that follows crashes, and that mail would never be retried.
+
+    On the FIRST run there is no cursor, so "everything after nothing" is the
+    entire mailbox. It used to fetch 30 and archive two years of history on
+    its first breath. With no cursor we now window the query to
+    AGENT_FIRST_RUN_DAYS and say so, out loud. Once a cursor exists the
+    window is dropped entirely — it would silently drop mail older than the
+    window that arrived while the agent was down.
     """
     cursor = db.get_cursor(provider.account, "inbox")
-    msgs = provider.list_messages(folder="INBOX", limit=limit, after_id=cursor)
+    first_run = not cursor
+    days = 0
+    if cfg is not None:
+        limit = limit or cfg.agent.fetch_limit
+        if first_run:
+            days = max(0, int(cfg.agent.first_run_days))
+            if days:
+                log.info("first run for %s: only mail from the last %d day(s)",
+                         provider.account, days)
+    limit = limit or 30
+    msgs = provider.list_messages(folder="INBOX", limit=limit, after_id=cursor,
+                                  newer_than_days=days)
     # upsert_message returns True when the row is new, so keep the ones that
     # were True — not the ones that were not.
     new_ids = {m["id"] for m in msgs if db.upsert_message(m)}
@@ -258,7 +303,8 @@ def fetch_new(provider: MailProvider, limit: int = 30) -> list[dict[str, Any]]:
     # Fetch the bodies of what is actually new, in one batch. The run prompt
     # includes them, so the model does not spend a round trip per message.
     try:
-        full = provider.get_messages(new_ids[:12])
+        pre = cfg.agent.body_prefetch if cfg is not None else 12
+        full = provider.get_messages(new_ids[:max(1, pre)])
     except Exception as e:
         log.warning("body prefetch failed: %s", type(e).__name__)
         full = []
@@ -277,33 +323,55 @@ def fetch_new(provider: MailProvider, limit: int = 30) -> list[dict[str, Any]]:
     return new
 
 
-def advance_cursor(provider: MailProvider) -> None:
-    """Move the high-water mark to the newest stored message for this account.
+def advance_cursor(provider: MailProvider, ids: list[str] | None = None) -> None:
+    """Move the high-water mark to the newest message THIS RUN handled.
 
-    Called only after a run completes without error, so an interrupted run
-    leaves the cursor where it was and the mail is re-fetched next cycle.
+    It used to take the newest message by date across the whole account,
+    which is not the same thing. Run A fetches 30 messages and dies partway
+    leaving 22 unprocessed; run B succeeds and jumps the cursor to the
+    newest message in the account, which is past those 22. They are never
+    fetched again and the recovery is manual SQL.
+
+    The cursor may only ever advance over messages we actually processed,
+    so the caller passes the ids from this run. Called only after a run
+    completes without error, so an interrupted run leaves the cursor where
+    it was and its mail is re-fetched next cycle.
     """
+    ids = [i for i in (ids or []) if i]
+    if not ids:
+        return
+    qs = ",".join("?" * len(ids))
     with db.db() as c:
         row = c.execute(
-            "SELECT id FROM messages WHERE account=? ORDER BY date DESC LIMIT 1",
-            (provider.account,),
+            f"SELECT id FROM messages WHERE account=? AND id IN ({qs}) "
+            "ORDER BY date DESC LIMIT 1",
+            [provider.account, *ids],
         ).fetchone()
     if row:
         db.set_cursor(provider.account, "inbox", row["id"])
 
 
+def first_run_window(provider: MailProvider) -> bool:
+    """True when this account has never completed a run (no cursor yet)."""
+    return not db.get_cursor(provider.account, "inbox")
+
+
 def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = None,
          profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Full cycle: fetch, run the agent, and only then advance the cursor."""
-    new = fetch_new(provider)
+    new = fetch_new(provider, cfg=cfg)
     if not new:
         return {"status": "empty", "new": 0}
+    if first_run_window(provider):
+        log.info("first run: %d message(s) from the last %d day(s). "
+                 "Older mail is untouched — change AGENT_FIRST_RUN_DAYS to "
+                 "look further back.", len(new), cfg.agent.first_run_days)
     log.info("%s: %d new messages", provider.account, len(new))
     res = run_once(provider.account, provider, cfg, trigger="scan", notify=notify, messages=new,
                    model=model, profile=profile)
     # Advance only on a clean run so a crash does not swallow pending mail.
     if res.get("status") == "ok":
-        advance_cursor(provider)
+        advance_cursor(provider, [m["id"] for m in new])
 
     # Report the outcome. Sends already notified themselves; without this the
     # operator hears nothing at all when the agent escalated something, which

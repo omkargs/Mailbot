@@ -8,6 +8,17 @@ from pathlib import Path
 
 import pytest
 
+
+def _parse_dt(v):
+    import datetime as _dt
+    if not v:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=_dt.timezone.utc)
+
 _tmp = tempfile.mkdtemp(prefix="mailagent-test-")
 os.environ["MAIL_AGENT_DB"] = str(Path(_tmp) / "test.db")
 os.environ["MAIL_AGENT_DATA_DIR"] = _tmp
@@ -76,7 +87,16 @@ class FakeProvider:
     # --- interface ---
     def valid(self): return True
     def authenticate(self): return True
-    def list_messages(self, folder="INBOX", limit=20, after_id=None): return list(self.inbox)[:limit]
+    def list_messages(self, folder="INBOX", limit=20, after_id=None, newer_than_days=0):
+        # Honour the first-run window the way a real provider would, so the
+        # tests exercise the same path production does.
+        out = list(self.inbox)
+        if newer_than_days and not after_id:
+            import datetime as _dt
+            cut = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=newer_than_days)
+            out = [m for m in out
+                   if _parse_dt(m.get("date", "")) and _parse_dt(m["date"]) >= cut]
+        return out[:limit]
     def get_message(self, message_id):
         return next((m for m in self.inbox if m["id"] == message_id), None)
     def get_thread(self, thread_id):
