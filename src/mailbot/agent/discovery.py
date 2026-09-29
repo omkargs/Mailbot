@@ -27,6 +27,8 @@ TIMEOUT = 20
 PREFERRED = [
     "claude-opus-5.5", "claude-opus-5", "claude-opus-4.8",
     "claude-sonnet-5",
+    "anthropic/claude-opus-4", "anthropic/claude-sonnet-4",
+    "anthropic/claude-3.5-sonnet", "openai/gpt-4o",
     "claude-fable-5.1", "claude-fable-5",
     "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
     "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",

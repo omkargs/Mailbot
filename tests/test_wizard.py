@@ -179,3 +179,21 @@ def test_collect_credentials_json_rejects_garbage(monkeypatch, tmp_path, capsys)
     assert W.collect_credentials_json(dest) is False
     assert not dest.exists()
     assert "nothing written" in capsys.readouterr().out
+
+
+def test_provider_base_for_maps_all_choices():
+    from mailbot import wizard as W
+
+    assert W.provider_base_for(W.PROVIDER_CHOICES[0][0]) == "https://router.bynara.id"
+    assert W.provider_base_for(W.PROVIDER_CHOICES[1][0]) == "https://api.anthropic.com"
+    assert W.provider_base_for(W.PROVIDER_CHOICES[2][0]) == "https://openrouter.ai/api/anthropic"
+    assert W.provider_base_for(W.PROVIDER_CHOICES[3][0]) == "http://localhost:4000"
+    assert W.provider_base_for(W.PROVIDER_CHOICES[4][0]) is None
+    assert W.provider_base_for("nonsense") == "https://router.bynara.id"
+
+
+def test_openrouter_models_ranked():
+    from mailbot.agent import discovery as D
+
+    ranked = D.rank(["zzz-model", "anthropic/claude-sonnet-4", "aaa-model"])
+    assert ranked[0] == "anthropic/claude-sonnet-4"

@@ -53,6 +53,33 @@ IMPORT_KEYS = (
     "AGENT_BRIEF_HOUR",
 )
 
+PROVIDER_CHOICES = [
+    ("Bynara router — combo models, cheapest (recommended)",
+     "https://router.bynara.id"),
+    ("Anthropic direct — api.anthropic.com",
+     "https://api.anthropic.com"),
+    ("OpenRouter — hundreds of models, one key",
+     "https://openrouter.ai/api/anthropic"),
+    ("Local via LiteLLM gateway — your own box (needs LiteLLM on :4000)",
+     "http://localhost:4000"),
+    ("Custom Anthropic-compatible URL…", ""),
+]
+
+
+def provider_base_for(choice: str) -> str | None:
+    """Menu label -> base URL. None means 'ask for a custom URL'.
+
+    Only Anthropic-compatible endpoints work: Mailbot speaks the Anthropic
+    protocol (tool use, prompt caching). OpenAI-only endpoints (plain
+    Ollama, vanilla vLLM) do not — offering them would be a lie that fails
+    at 3am. OpenRouter qualifies via its /api/anthropic endpoint.
+    """
+    for label, base in PROVIDER_CHOICES:
+        if choice == label:
+            return base or None
+    return DEFAULTS["ROUTER_BASE_URL"]
+
+
 DEFAULTS = {
     "ROUTER_BASE_URL": "https://router.bynara.id",
     "ROUTER_MODEL": "combo/claude2mail",
@@ -318,18 +345,19 @@ def cmd_setup(args, cfg) -> int:
         if not s.get("ROUTER_BASE_URL") and not non_interactive and not fast and _tty():
             prov = _choose(
                 "Where should the brain run?",
-                ["Bynara router — combo models, cheapest (recommended)",
-                 "Anthropic direct — api.anthropic.com",
-                 "Custom Anthropic-compatible URL…"],
-                default="Bynara router — combo models, cheapest (recommended)",
+                [label for label, _ in PROVIDER_CHOICES],
+                default=PROVIDER_CHOICES[0][0],
             )
-            if prov.startswith("Bynara"):
-                write_secret("ROUTER_BASE_URL", DEFAULTS["ROUTER_BASE_URL"])
-            elif prov.startswith("Anthropic"):
-                write_secret("ROUTER_BASE_URL", "https://api.anthropic.com")
+            picked = provider_base_for(prov or "")
+            if picked:
+                write_secret("ROUTER_BASE_URL", picked)
+                if picked.startswith("http://localhost"):
+                    print("  Local gateway: run `litellm --port 4000 --model ollama/llama3`")
+                    print("  (plain Ollama alone won't work — Mailbot speaks the")
+                    print("   Anthropic protocol, LiteLLM translates)")
             else:
                 try:
-                    custom = input("  Base URL: ").strip()
+                    custom = input("  Base URL (must be Anthropic-compatible): ").strip()
                 except (EOFError, KeyboardInterrupt):
                     custom = ""
                 if custom:
