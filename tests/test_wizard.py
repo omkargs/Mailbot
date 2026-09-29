@@ -311,3 +311,125 @@ def test_list_pricing_parses_openrouter_shape(monkeypatch):
     out = D.list_pricing("https://openrouter.ai/api/anthropic", "k")
     assert out["cheap/x"] == (0.15, 0.47)
     assert "no-price" not in out
+
+
+def _setup_args(step="provider", **kw):
+    class Args:
+        pass
+    a = Args()
+    a.step = step
+    a.non_interactive = False
+    a.yes = False
+    a.fast = False
+    a.dry_run = False
+    a.import_env = False
+    a.skip_voice = True
+    a.skip_service = True
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def _wire(monkeypatch, tmp_path, probe_ok):
+    """Point the wizard at a scratch config and stub the network probe."""
+    from mailbot import wizard as W, setup as S, config as C
+    d = tmp_path / "cfg"
+    monkeypatch.setattr(C, "CONFIG_DIR", d)
+    monkeypatch.setattr(S, "config_dir", lambda: d)
+    monkeypatch.setattr(W, "config_dir", lambda: d)
+    monkeypatch.setattr(W, "_tty", lambda: True)
+    for k in ("ROUTER_API_KEY", "ROUTER_BASE_URL", "ROUTER_MODEL",
+              "ROUTER_TRIAGE_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    # The wizard reads the secrets file, not the environment, so seed that.
+    S.write_secret("ROUTER_API_KEY", "sk-test")
+    S.write_secret("ROUTER_BASE_URL", "https://example.test")
+    S.write_secret("ROUTER_MODEL", "m1")
+    from mailbot.agent import discovery as D
+    calls = []
+
+    def fake_probe(base, key, model, timeout=30.0):
+        calls.append((base, key, model))
+        return {"ok": probe_ok, "model": model, "said": "OK", "error": ""}
+
+    monkeypatch.setattr(D, "probe", fake_probe)
+    monkeypatch.setattr(D, "list_models", lambda *a, **k: ["m1", "m2"])
+    monkeypatch.setattr(D, "list_pricing", lambda *a, **k: {})
+    # A full run walks on into Google. Stub it so these tests are about the
+    # provider decision and nothing else.
+    monkeypatch.setattr(W, "collect_credentials_json", lambda p: True)
+    monkeypatch.setattr(W, "headless_google_auth", lambda *a, **k: True)
+    monkeypatch.setattr(W, "_test_notify", lambda which: True)
+    return calls
+
+
+def test_working_provider_is_not_asked_again(monkeypatch, tmp_path, capsys):
+    """A provider that already works must not open a menu every run.
+
+    The user asked for this repeatedly. A prompt with no decision in it
+    trains people to press Enter without reading, which is the last thing
+    a tool that sends mail for you should do.
+    """
+    import mailbot.menu as M
+    from mailbot import wizard as W, config as C
+
+    opened = []
+    monkeypatch.setattr(M, "choose", lambda *a, **k: opened.append(a) or None)
+    _wire(monkeypatch, tmp_path, probe_ok=True)
+
+    W.cmd_setup(_setup_args(step=None), C.load())
+    out = capsys.readouterr().out
+    assert not any("brain run" in a[0] for a in opened), \
+        f"provider menu opened even though it already works: {opened}"
+    assert "working" in out
+    assert "setup --step provider" in out      # but there is a way to change it
+
+
+def test_broken_provider_still_asks(monkeypatch, tmp_path, capsys):
+    """If the key is wrong there IS a decision, so the menu must appear."""
+    import mailbot.menu as M
+    from mailbot import wizard as W, config as C
+
+    opened = []
+    monkeypatch.setattr(M, "choose", lambda *a, **k: opened.append(a) or "Keep current")
+    _wire(monkeypatch, tmp_path, probe_ok=False)
+
+    W.cmd_setup(_setup_args(step=None), C.load())
+    out = capsys.readouterr().out
+    prompts = [a[0] for a in opened]
+    assert "Where should the brain run?" in prompts, prompts
+
+
+def test_set_triage_model_is_not_re_asked(monkeypatch, tmp_path, capsys):
+    """Once triage is decided, stop asking — same rule as the provider."""
+    import mailbot.menu as M
+    from mailbot import wizard as W, config as C
+
+    asked = []
+    real_choose = M.choose
+
+    def spy(prompt, options, **k):
+        asked.append(prompt)
+        return "Keep current" if "brain run" in prompt else options[0]
+
+    monkeypatch.setattr(M, "choose", spy)
+    from mailbot import setup as S
+    _wire(monkeypatch, tmp_path, probe_ok=True)
+    S.write_secret("ROUTER_TRIAGE_MODEL", "m2")
+
+    W.cmd_setup(_setup_args(step=None), C.load())
+    capsys.readouterr()
+    assert not any("triage" in p for p in asked), asked
+
+
+def test_explicit_step_provider_always_offers_the_picker(monkeypatch, tmp_path):
+    """Asking for the provider step is asking to change it — honour that."""
+    import mailbot.menu as M
+    from mailbot import wizard as W, config as C
+
+    opened = []
+    monkeypatch.setattr(M, "choose", lambda *a, **k: opened.append(a) or "Keep current")
+    _wire(monkeypatch, tmp_path, probe_ok=True)
+
+    W.cmd_setup(_setup_args(step="provider"), C.load())
+    assert opened, "--step provider must show the picker even when it works"

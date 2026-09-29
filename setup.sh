@@ -39,6 +39,10 @@ Usage: ./setup.sh [--fast] [--reinstall] [--non-interactive] [--verbose]
 EOF
 }
 
+# The splash needs the flags to know when to stay out of the way, but the
+# loop below shifts them away. Keep a copy.
+ORIG_ARGS=" $* "
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -95,6 +99,91 @@ die()  {
   fi
   _log "FATAL: $head" 2>/dev/null || true
   exit 1
+}
+
+# The splash: the Mailbot wordmark, and under it a mailbox where one
+# envelope slides in from the right, drops in, and the flag goes up.
+# It is the first thing you see, it runs about a second, and any key
+# skips it. No countdown, no "showing off" line — branding must never
+# cost you time, and automation must never wait on it.
+_MBOX_POLE=30
+_mbox_logo() {
+  printf '%s\n' \
+    '              __  __       _  _  _                 ' \
+    '             |  \/  |  __ _ (_)| |  ___ ___        ' \
+    '             | |\/| | / _` || || | / _ / _ \       ' \
+    '             | |  | || (_| || || || (_) (_) |      ' \
+    '             |_|  |_| \__,_||_||_| \___/ \___/      '
+}
+_mbox_frame() {
+  local col="$1" frow="$2" e0="" e1="" e2="" line pole
+  if [ "$col" -ge 0 ]; then
+    e0="$(printf '%*s.---.'  "$col" '')"
+    e1="$(printf '%*s|\\ /|' "$col" '')"
+    e2="$(printf "%*s'---'" "$col" '')"
+  fi
+  _mbox_logo
+  printf '\n%s\n%s\n%s\n' "$e0" "$e1" "$e2"
+  local -a body=(
+    "     .------------------."
+    "    /   ____________   \\"
+    "   |   |    MAIL    |   |"
+    "   |   |____________|   |"
+    "    \\__________________/"
+    "          |    |"
+    "          |    |"
+  )
+  local i=0
+  for line in "${body[@]}"; do
+    pole="|"
+    [ "$i" = "$frow" ] && pole="|▰"
+    printf '%s%*s%s\n' "$line" $((_MBOX_POLE - ${#line})) "$pole"
+    i=$((i + 1))
+  done
+}
+
+splash() {
+  # Automation and one-shot stages never wait on decoration.
+  # All patterns on one line: bash will not take a line continuation
+  # inside a case pattern list, it reads the backslash as a literal.
+  case "${ORIG_ARGS:-}" in
+    *" --manifest "*|*" --stage "*|*" --fast "*|*" --yes "*|*" --non-interactive "*|*" --dry-run "*|*" --import-env "*|*" --help "*|*" -h "*)
+      return 0 ;;
+  esac
+  [ -t 0 ] && [ -t 1 ] || return 0
+  [ -n "${MAIL_AGENT_NO_SPLASH:-}" ] && return 0
+  [ "${TERM:-dumb}" = "dumb" ] && return 0
+  [ -n "${CI:-}" ] && return 0
+  # Art this wide wraps into soup in a narrow pane, and this tall needs
+  # room; either way it looks broken, so it just does not run.
+  [ "$(tput cols 2>/dev/null || echo 80)" -lt 52 ] && return 0
+  [ "$(tput lines 2>/dev/null || echo 24)" -lt 20 ] && return 0
+
+  # The frame is written WITHOUT a trailing newline, so the cursor ends up
+  # on the last line of the art. Redrawing is then "up (rows-1), carriage
+  # return, erase from here to the end of the screen, draw". The erase has
+  # to come BEFORE the new frame: trailing it only clears below the art and
+  # leaves the old frame's envelope ghosted across the row. Printing a
+  # trailing newline and rewinding `rows` instead drifts one row per frame,
+  # which walks the splash diagonally down the screen.
+  local spec col frow frame rows prev=0
+  for spec in "-1 6" "44 6" "36 6" "28 5" "20 4" "14 2" "-1 2" "-1 2"; do
+    col="${spec% *}"; frow="${spec#* }"
+    frame="$(_mbox_frame "$col" "$frow")"
+    rows="$(printf '%s\n' "$frame" | wc -l)"
+    [ "$prev" -gt 0 ] && printf '\033[%dA\r' "$((prev - 1))"
+    printf '\033[J%s' "$frame"
+    prev="$rows"
+    # Any key skips the rest of it.
+    if read -rsn1 -t 0.11 _splash_key 2>/dev/null; then
+      frame="$(_mbox_frame -1 2)"
+      rows="$(printf '%s\n' "$frame" | wc -l)"
+      printf '\033[%dA\r\033[J%s' "$((rows - 1))" "$frame"
+      break
+    fi
+  done
+  printf '\n\n%s\n' "${DIM}The inbox colleague that acts. MIT, yours.${RST}"
+  return 0
 }
 
 # Pick a Python >= 3.11, self-healing. Tries, in order:
@@ -184,6 +273,8 @@ check_network() {
   esac
   return 0
 }
+
+splash
 
 PY=""
 check_network

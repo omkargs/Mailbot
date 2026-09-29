@@ -519,12 +519,25 @@ def cmd_setup(args, cfg) -> int:
         from .menu import choose as _choose
 
         s = read_secrets()
-        # Always offer the provider picker when interactive. It was gated on
-        # ROUTER_BASE_URL being unset, so a second run silently skipped
-        # straight to models — the user could never switch providers without
-        # hand-editing the secrets file.
-        if not non_interactive and not fast and _tty():
-            current = s.get("ROUTER_BASE_URL", "")
+        base = (s.get("ROUTER_BASE_URL") or DEFAULTS["ROUTER_BASE_URL"]).strip()
+        key = s.get("ROUTER_API_KEY", "")
+        model = s.get("ROUTER_MODEL", "") or DEFAULTS["ROUTER_MODEL"]
+
+        # Probe BEFORE offering the picker. If what is already configured
+        # actually works there is no decision to make, and a menu on every
+        # run is how you teach someone to press Enter without reading —
+        # the last thing a tool that sends mail on your behalf should do.
+        # The picker appears when there is a real choice: nothing set up,
+        # or what is set up does not work. `--step provider` forces it.
+        probe = D.probe(base, key, model) if key else {"ok": False}
+        working = bool(probe.get("ok"))
+        probed_model = model      # what we actually asked, not what it echoed
+
+        if working and only != "provider":
+            print(f"  provider: {base} — working ({model})")
+            print("  to switch: mail-agent setup --step provider")
+        elif not non_interactive and not fast and _tty():
+            current = base
             labels = [l for l, _ in PROVIDER_CHOICES]
             for i, (_lbl, url) in enumerate(PROVIDER_CHOICES):
                 if url and url == current:
@@ -549,12 +562,16 @@ def cmd_setup(args, cfg) -> int:
                     if custom:
                         write_secret("ROUTER_BASE_URL", D.normalise_base(custom))
             s = read_secrets()
-        base = (s.get("ROUTER_BASE_URL") or DEFAULTS["ROUTER_BASE_URL"]).strip()
+            new_base = (s.get("ROUTER_BASE_URL") or base).strip()
+            if D.normalise_base(new_base) != D.normalise_base(base):
+                # A different endpoint means the old verdict means nothing.
+                base = new_base
+                key = s.get("ROUTER_API_KEY", "")
+                probe, working = {"ok": False}, False
         base = D.normalise_base(base)
         write_secret("ROUTER_BASE_URL", base)
-        print(f"  provider: {base}")
-        key = s.get("ROUTER_API_KEY", "")
-        model = s.get("ROUTER_MODEL", "") or DEFAULTS["ROUTER_MODEL"]
+        if not working:
+            print(f"  provider: {base}")
         if not key:
             if non_interactive or not _tty():
                 print("  ! No API key yet. This is the password your AI provider")
@@ -596,19 +613,33 @@ def cmd_setup(args, cfg) -> int:
                               "enter to choose, or pick the last line to type "
                               "your own id:")
                     pick = _choose(prompt, labels + [MANUAL], default=labels[0])
+
+                    def _try_id(typed: str) -> None:
+                        """Save a model id only once the endpoint agrees."""
+                        nonlocal model
+                        if not typed:
+                            return
+                        chk = D.probe(base, key, typed)
+                        if chk["ok"]:
+                            model = typed
+                        else:
+                            print(f"  ! that id failed ({chk['error'][:100]}); keeping {model}")
+
                     if pick == MANUAL:
                         try:
                             typed = input("  Model id: ").strip()
                         except (EOFError, KeyboardInterrupt):
                             typed = ""
-                        if typed:
-                            chk = D.probe(base, key, typed)
-                            if chk["ok"]:
-                                model = typed
-                            else:
-                                print(f"  ! that id failed ({chk['error'][:100]}); keeping {model}")
+                        _try_id(typed)
                     elif pick:
-                        model = back.get(pick, pick)
+                        known = back.get(pick)
+                        if known:
+                            model = known
+                        else:
+                            # Typed straight into the search box and matched
+                            # nothing in the list. Still a real choice, so
+                            # verify it before it becomes the default.
+                            _try_id(pick)
                 write_secret("ROUTER_MODEL", model)
             elif not models and not non_interactive and not fast and _tty():
                 # Endpoint lists nothing (or unreachable for listing) — let
@@ -621,14 +652,21 @@ def cmd_setup(args, cfg) -> int:
                 if typed:
                     model = typed
                     write_secret("ROUTER_MODEL", model)
-            res = D.probe(base, key, model)
+            # Reuse the verdict from the top of this step when the model
+            # has not changed since; otherwise ask again.
+            res = probe if (working and model == probed_model) else D.probe(base, key, model)
             if res["ok"]:
-                print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
+                if not working:
+                    print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
                 state["provider"] = "ok"
                 # Cheap triage model: the two-brain pass stays off unless this
                 # is set. Offer it interactively; agents pass it via env.
                 existing_tri = s.get("ROUTER_TRIAGE_MODEL", "")
-                if not non_interactive and not fast and _tty() and models:
+                # Once this is decided, stop asking. Same rule as the
+                # provider: a prompt with no decision in it trains people
+                # to stop reading prompts.
+                if (not non_interactive and not fast and _tty() and models
+                        and only != "provider" and not existing_tri):
                     MANUAL = "Type it manually…"
                     tri_ids = [m for m in D.rank(models) if m != model][:8]
                     prices = D.list_pricing(base, key)

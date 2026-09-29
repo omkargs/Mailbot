@@ -23,6 +23,12 @@ _UP = ("\x1b[A", "k")
 _DOWN = ("\x1b[B", "j")
 _MAX_VISIBLE = 12
 
+# Cursor value meaning "use the search text itself as the answer". Typing a
+# model id that matches nothing in the list used to be a dead end: the menu
+# said "no matches" and that was that, even though the user had just typed
+# the exact id they wanted. Type-or-select means both are real choices.
+FREE = -1
+
 
 class Menu:
     """Testable menu state: movement, toggle, search, render. No I/O here."""
@@ -54,6 +60,8 @@ class Menu:
         self.cursor = vis[(pos + delta) % len(vis)]
 
     def toggle(self) -> None:
+        if self.cursor == FREE:
+            return
         if self.cursor in self.selected:
             self.selected.discard(self.cursor)
         else:
@@ -68,14 +76,20 @@ class Menu:
     # --------------------------------------------------------------- search
     def type_char(self, ch: str) -> None:
         self.query += ch
-        vis = self.visible()
-        if vis and self.cursor not in vis:
-            self.cursor = vis[0]
+        self._settle()
 
     def backspace(self) -> None:
         self.query = self.query[:-1]
+        self._settle()
+
+    def _settle(self) -> None:
+        """Put the cursor somewhere real after the query changed."""
         vis = self.visible()
-        if vis and self.cursor not in vis:
+        if not vis:
+            # Nothing matched. The only thing on screen is "use this text",
+            # so put the cursor there rather than on nothing at all.
+            self.cursor = FREE if self.query else 0
+        elif self.cursor not in vis:
             self.cursor = vis[0]
 
     def clear_search(self) -> None:
@@ -83,13 +97,32 @@ class Menu:
         self.cursor = 0
 
     # --------------------------------------------------------------- render
-    def render(self, prompt: str, multi: bool = False) -> str:
-        out = [prompt]
+    @staticmethod
+    def _clip(text: str, width: int | None) -> str:
+        """Trim to the terminal width so a long line wraps to nothing.
+
+        Wrapping is what turned the picker into a smear: a line wider than
+        the pane occupies two rows, the frame's height stops matching the
+        number of newlines, and the redraw lands in the wrong place. Clip
+        the text, keep the marker and checkbox whole.
+        """
+        if not width or len(text) <= width:
+            return text
+        return text[:max(1, width - 1)] + "…"
+
+    def render(self, prompt: str, multi: bool = False,
+               width: int | None = None) -> str:
+        out = [self._clip(prompt, width)]
         if self.query:
-            out.append(f"  search: {self.query}   (backspace to edit, esc clears)")
+            out.append(self._clip(
+                f"  search: {self.query}   (backspace to edit, esc clears)", width))
         vis = self.visible()
-        if not vis:
-            out.append(f"  no matches for {self.query!r}")
+        if not vis and self.query:
+            lead = f"{ARROW} ✏ Use "
+            out.append(lead + self._clip(f"{self.query!r} as the value",
+                                         (width - len(lead)) if width else None))
+        elif not vis:
+            out.append("  (nothing to pick)")
         else:
             # Window around the cursor so 300 rows never scroll off.
             start = 0
@@ -99,17 +132,25 @@ class Menu:
             for i in vis[start:start + _MAX_VISIBLE]:
                 arrow = ARROW if i == self.cursor else " "
                 active = " (active)" if self.active and self.options[i] == self.active else ""
-                if multi:
-                    box = "[x]" if i in self.selected else "[ ]"
-                    out.append(f"{arrow} {box} {self.options[i]}{active}")
-                else:
-                    out.append(f"{arrow} {self.options[i]}{active}")
+                # Reserve room for the marker, checkbox and the active tag,
+                # so the option text is what gets clipped.
+                lead = f"{arrow} {'[x] ' if (multi and i in self.selected) else ('[ ] ' if multi else '')}"
+                tail = active if not width or len(lead) + len(active) < width else ""
+                out.append(lead + self._clip(
+                    f"{self.options[i]}{tail}",
+                    (width - len(lead)) if width else None))
             if len(vis) > _MAX_VISIBLE:
-                out.append(f"  … {len(vis) - _MAX_VISIBLE} more (type to search)")
-        keys = "↑↓ move  •  type to search  •  esc cancel"
+                out.append(self._clip(
+                    f"  … {len(vis) - _MAX_VISIBLE} more (type to search)", width))
+        keys = "↑↓ move  •  type to search  •  esc cancel  •  enter confirm"
         if multi:
-            keys = "↑↓ move  •  space select  •  type to search  •  esc cancel"
-        out.append(keys + "  •  enter confirm")
+            keys = "↑↓ move  •  space select  •  type to search  •  esc cancel  •  enter confirm"
+        if width and len(keys) > width:
+            # Too narrow for the full legend. Drop the least important
+            # parts rather than spilling onto a second row.
+            keys = "↑↓ move • ␣ select • type • enter" if multi else "↑↓ move • type • enter"
+            keys = self._clip(keys, width)
+        out.append(keys)
         return "\n".join(out)
 
 
@@ -194,7 +235,7 @@ def _run(menu: Menu, prompt: str, multi: bool):
     try:
         tty.setraw(fd)
         while True:
-            frame = menu.render(prompt, multi)
+            frame = menu.render(prompt, multi, width=width)
             rows = _visual_height(frame, width)
             # Rewind to the first row of our previous frame, clear below it,
             # then repaint. Rewind is rows-1 because the cursor rests on the
@@ -275,6 +316,10 @@ def choose(prompt: str, options: list[str], default=None, active: str = ""):
     print()
     if got is None:
         return default
+    if got == FREE:
+        # The user typed an id that is not in the list. That is a valid
+        # answer, not a mistake — hand back exactly what they typed.
+        return menu.query
     return options[got]
 
 
