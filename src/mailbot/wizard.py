@@ -213,7 +213,7 @@ def collect_credentials_json(creds_path: Path) -> bool:
     print("    (Copy it from the downloaded file — Ctrl-C here to skip.)")
     lines: list[str] = []
     try:
-        while True:
+        while len(lines) < 2000:
             line = input("    │ ")
             if not line.strip():
                 break

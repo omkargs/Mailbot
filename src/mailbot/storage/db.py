@@ -468,7 +468,7 @@ def pending_approvals(account: str | None = None) -> list[dict[str, Any]]:
 def resolve_approval(id: str, status: str, by: str = "user") -> dict[str, Any] | None:
     with db() as c:
         c.execute(
-            "UPDATE approvals SET status=?, decided_at=?, decided_by=? WHERE id=? AND status='pending'",
+            "UPDATE approvals SET status=?, decided_at=?, decided_by=? WHERE id=? AND status IN ('pending','claimed')",
             (status, now(), by, id),
         )
         row = c.execute("SELECT * FROM approvals WHERE id=?", (id,)).fetchone()

@@ -399,9 +399,12 @@ def cmd_schedule(args, cfg):
     providers = _providers(cfg)
     account = next(iter(providers), "google")
     jid = f"job_{uuid.uuid4().hex[:10]}"
+    repeat = args.repeat or spec["repeat"]
+    if repeat not in ("none", "daily", "weekly"):
+        repeat = "none"
     db.create_job(jid, account, spec["kind"], at_time=spec["at_time"],
                   at_minutes=spec["in_minutes"],
-                  repeat=args.repeat or spec["repeat"], prompt=spec["prompt"])
+                  repeat=repeat, prompt=spec["prompt"])
 
     if spec["in_minutes"] is not None:
         from datetime import datetime, timedelta

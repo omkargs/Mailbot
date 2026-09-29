@@ -729,6 +729,11 @@ class ToolBox:
 
         jid = f"job_{uuid.uuid4().hex[:10]}"
         repeat = a.get("repeat") or spec["repeat"]
+        # The model types this freehand. Anything outside the three known
+        # values used to persist and behave like a sticky daily (only
+        # "none" self-disables). Coerce junk to one-shot.
+        if repeat not in ("none", "daily", "weekly"):
+            repeat = "none"
         db.create_job(
             jid, self.p.account, spec["kind"],
             at_time=spec["at_time"], at_minutes=spec["in_minutes"],

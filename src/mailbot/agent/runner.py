@@ -114,8 +114,9 @@ def run_once(
     if not pending:
         db.finish_run(run_id, triaged=box.stats["triaged"],
                       input_tokens=0, output_tokens=0, status="ok")
+        n = box.stats["triaged"]
         return {"status": "ok", "run_id": run_id,
-                "summary": "Nothing needed doing — newsletters filed.",
+                "summary": f"Filed {n} newsletter(s) — nothing needs you.",
                 "stats": box.stats,
                 "usage": {"input_tokens": 0, "output_tokens": 0,
                           "cache_read": 0, "cache_write": 0}}
@@ -319,8 +320,12 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
             body = f"\n\n{summary}" if summary else ""
             notify(f"{tag} {head}{body}" if tag else f"{head}{body}")
         elif not st.get("sent") and not st.get("drafted") and summary:
-            # Only chatter when the agent judged something worth saying.
-            if len(summary) > 20 and not summary.lower().startswith(("no ", "nothing ")):
+            # Only chatter when the agent judged something worth saying —
+            # or filed something worth knowing about. Filed-mail reports
+            # always go out; silent archiving is how mail disappears.
+            low = summary.lower()
+            if len(summary) > 20 and (low.startswith("filed ") or
+                                      not low.startswith(("no ", "nothing "))):
                 notify(f"{tag} {summary}" if tag else summary)
     return res
 
@@ -331,11 +336,18 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
     from ..providers.base import DraftRequest
 
     with db.db() as c:
-        row = c.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
-    if not row:
-        return {"ok": False, "error": "no such approval"}
-    if row["status"] != "pending":
-        return {"ok": False, "error": f"already {row['status']}"}
+        # Atomic claim: exactly one executor wins. Concurrent approves
+        # (double-tap, CLI racing chat) used to send N duplicate mails.
+        cur = c.execute(
+            "UPDATE approvals SET status='claimed' WHERE id=? AND status='pending'",
+            (approval_id,))
+        if cur.rowcount == 0:
+            row = c.execute("SELECT status FROM approvals WHERE id=?",
+                            (approval_id,)).fetchone()
+            return {"ok": False,
+                    "error": f"already {row['status']}" if row else "no such approval"}
+        row = c.execute("SELECT * FROM approvals WHERE id=?",
+                        (approval_id,)).fetchone()
 
     payload = json.loads(row["payload"])
     db.resolve_approval(approval_id, "approved" if approved else "denied", by="user")

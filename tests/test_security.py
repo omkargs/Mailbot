@@ -359,3 +359,68 @@ def test_run_approval_blocks_injected_payload(provider):
     res = run_approval("google", provider, _full_cfg(), "ap_test123456", True)
     assert res["ok"] is False
     assert provider.sent == []
+
+
+# ------------------------------------------------- audit round 2 fixes
+
+def test_concurrent_approves_send_once(provider, cfg):
+    """The race PoC, caged: 8 racers, exactly 1 send."""
+    import threading
+    from mailbot.agent.runner import run_approval
+    from mailbot.storage import db
+
+    db.create_approval("ap_race000001", "google", "send",
+                       {"to": ["a@b.com"], "subject": "x",
+                        "body": "hello friend, confirming friday works fine",
+                        "in_reply_to": "", "attachments": []},
+                       reason="race test")
+    results = []
+    ts = [threading.Thread(target=lambda: results.append(
+        run_approval("google", provider, cfg, "ap_race000001", True)))
+        for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(provider.sent) == 1
+    assert sum(1 for r in results if r.get("sent")) == 1
+
+
+def test_filed_newsletters_are_reported(provider, cfg, monkeypatch):
+    import mailbot.agent.runner as R
+
+    cfg.router.triage_model = "cheap/x"
+    monkeypatch.setattr(
+        R.triage, "classify",
+        lambda items, c: {m["id"]: {"v": "ignore", "why": "promo"} for m in items})
+    notes = []
+    provider.add_message(sender="news@x.com", subject="Weekly deals",
+                         body="10% off everything this week, shop now friend")
+    res = R.scan(provider, cfg, notify=notes.append)
+    assert "Filed 1" in res["summary"]
+    assert notes and "Filed 1" in notes[0]
+
+
+def test_junk_repeat_coerced_to_oneshot(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    box = ToolBox(provider, cfg, run_id=1)
+    r = box.run("schedule_task", {"request": "brief at 5", "repeat": "junkrepeat"})
+    assert r["ok"] is True and r["repeat"] == "none"
+    from mailbot.storage import db
+
+    with db.db() as c:
+        row = c.execute("SELECT repeat FROM scheduled_jobs WHERE id=?",
+                        (r["job_id"],)).fetchone()
+    assert row["repeat"] == "none"
+
+
+def test_listener_dedupe_is_bounded(cfg, provider):
+    from mailbot.notify.channels import ApprovalListener
+
+    listener = ApprovalListener(cfg, {"google": provider})
+    for i in range(6000):
+        listener._mark(f"k{i}")
+    assert len(listener._seen) <= 5000
+    assert listener._mark("k5999") is True   # recent: still remembered
+    assert listener._mark("k0") is False     # ancient: evicted, re-accepted

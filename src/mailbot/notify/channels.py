@@ -310,8 +310,25 @@ class ApprovalListener:
         self.cfg = cfg
         self.providers = providers
         self.notifier = build_notifiers(cfg)
-        self._seen: set[str] = set()
+        # Bounded dedupe: duplicates arrive seconds apart (restarts, racing
+        # pollers), so a few thousand entries cover it. An unbounded set
+        # grew for the lifetime of the daemon.
+        from collections import deque
+
+        self._seen: deque = deque(maxlen=5000)
+        self._seen_set: set[str] = set()
         self._lock = threading.Lock()
+
+    def _mark(self, key) -> bool:
+        """True if already seen (skip it), else record and return False."""
+        with self._lock:
+            if key in self._seen_set:
+                return True
+            if len(self._seen) == self._seen.maxlen:
+                self._seen_set.discard(self._seen[0])
+            self._seen.append(key)
+            self._seen_set.add(key)
+            return False
 
     def tick(self) -> int:
         if not self.notifier.interactive():
@@ -330,11 +347,8 @@ class ApprovalListener:
                 # fetch and reply, or two pollers racing, would otherwise
                 # answer the same message twice.
                 uid = d.get("update_id")
-                if uid is not None:
-                    with self._lock:
-                        if uid in self._seen:
-                            continue
-                        self._seen.add(uid)
+                if uid is not None and self._mark(uid):
+                    continue
                 try:
                     reply = handle_text(d.get("text", ""), self.cfg, self.providers, ops)
                 except Exception as e:
@@ -346,10 +360,8 @@ class ApprovalListener:
                 continue
 
             key = f"{action}:{d['approval_id']}"
-            with self._lock:
-                if key in self._seen:
-                    continue
-                self._seen.add(key)
+            if self._mark(key):
+                continue
             provider = self.providers.get("google") or next(iter(self.providers.values()), None)
             if not provider:
                 continue
