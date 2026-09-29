@@ -32,6 +32,20 @@ SCHEMA = [
         updated_at    TEXT
     )
     """,
+    # ---------- profiles ----------
+    # A profile is a named inbox binding: one profile = one account's mail +
+    # its own voice + an optional model override. The single-account install
+    # migrates to exactly one profile, so old behaviour is unchanged.
+    """
+    CREATE TABLE IF NOT EXISTS profiles (
+        id             TEXT PRIMARY KEY,          -- 'personal'
+        name           TEXT NOT NULL,             -- 'Personal'
+        account        TEXT NOT NULL,             -- 'google' | 'microsoft'
+        model_override TEXT NOT NULL DEFAULT '',  -- '' = first/global model
+        is_current     INTEGER NOT NULL DEFAULT 0,
+        created_at     TEXT
+    )
+    """,
     # ---------- messages ----------
     """
     CREATE TABLE IF NOT EXISTS messages (

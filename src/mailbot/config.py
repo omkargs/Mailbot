@@ -197,6 +197,12 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
 
+    @property
+    def profiles(self) -> list[dict[str, Any]]:
+        """Named inbox bindings (see profiles.py). [] = not migrated yet."""
+        profs = cfg().get("profiles", [])
+        return list(profs) if isinstance(profs, list) else []
+
     def brain_path(self) -> Path:
         """Directory holding the style profiles. Callers append the filename."""
         return Path(_v("MAIL_AGENT_BRAIN", str(Path(__file__).parent.parent.parent / "brain")))
