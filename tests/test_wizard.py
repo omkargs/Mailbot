@@ -631,3 +631,48 @@ def test_list_models_falls_back_to_the_allowlist(monkeypatch):
     monkeypatch.setattr(D.urllib.request, "urlopen", boom)
     got = D.list_models("https://api.anthropic.com", "sk-x")
     assert got and any(m.startswith("claude-") for m in got)
+
+
+def test_unknown_step_is_rejected_not_silently_ignored(monkeypatch, tmp_path, capsys):
+    """A typo must not look like a successful run.
+
+    `--step bogus` used to plan a single "summary" step and exit 0, so a
+    mistyped step in an agent-driven script looked like it had run.
+    setup.sh --stage already refused an unknown name; this is the same
+    rule on the Python path.
+    """
+    from mailbot import wizard as W, config as C
+
+    d = tmp_path / "cfg"
+    monkeypatch.setattr(C, "CONFIG_DIR", d)
+    assert W.cmd_setup(_setup_args(step="bogus"), C.load()) == 2
+    out = capsys.readouterr().out
+    assert "unknown step: 'bogus'" in out
+    assert "valid:" in out
+
+
+def test_unknown_step_suggests_the_obvious_typo(monkeypatch, tmp_path, capsys):
+    from mailbot import wizard as W, config as C
+
+    d = tmp_path / "cfg"
+    monkeypatch.setattr(C, "CONFIG_DIR", d)
+    assert W.cmd_setup(_setup_args(step="providr"), C.load()) == 2
+    out = capsys.readouterr().out
+    assert "--step provider" in out
+
+
+def test_every_valid_step_is_accepted(monkeypatch, tmp_path):
+    """The validator and the plan must not drift apart."""
+    from mailbot import wizard as W, config as C
+
+    d = tmp_path / "cfg"
+    monkeypatch.setattr(C, "CONFIG_DIR", d)
+    for step in sorted(W.SETUP_STEPS):
+        # 2 means "rejected as an unknown step". Anything else is fine:
+        # add-inbox legitimately needs a TTY, so it returns 1 here.
+        assert W.cmd_setup(_setup_args(step=step), C.load()) != 2, step
+    # verify is an alias for the full pass, and "" is the full pass. Both
+    # end in the honest summary, which returns 1 here for want of a key -
+    # again, not 2.
+    assert W.cmd_setup(_setup_args(step="verify"), C.load()) != 2
+    assert W.cmd_setup(_setup_args(step=""), C.load()) != 2

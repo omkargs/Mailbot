@@ -636,12 +636,31 @@ def _test_notify(which: str) -> bool:
     return False
 
 
+# Every --step value this command understands. Kept in one place so the
+# validator and the plan builder cannot drift apart.
+SETUP_STEPS = {"provider", "google", "chat", "voice", "start", "add-inbox"}
+
+
 def cmd_setup(args, cfg) -> int:
     import time as _time
 
     only = (getattr(args, "step", "") or "").lower()
     if only == "verify":
         only = ""  # verify = full pass ending in the honest summary
+    elif only and only not in SETUP_STEPS:
+        # A typo used to be a silent no-op: the plan came back containing
+        # only "summary" and the command exited 0, so a mistyped step in an
+        # agent-driven script looked like it had run. setup.sh --stage
+        # already refused an unknown name; this is the same rule here.
+        from .ui import suggest_command
+        near = suggest_command(only, sorted(SETUP_STEPS))
+        print(f"  unknown step: {only!r}")
+        print(f"  valid: {', '.join(sorted(SETUP_STEPS))}")
+        if near:
+            print("  did you mean:")
+            for n in near:
+                print(f"    mail-agent setup --step {n}")
+        return 2
     non_interactive = bool(getattr(args, "non_interactive", False))
     fast = bool(getattr(args, "fast", False))
     dry_run = bool(getattr(args, "dry_run", False))
