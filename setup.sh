@@ -12,7 +12,11 @@ SECRETS="$CONFIG_DIR/.secrets"
 CONFIG="$CONFIG_DIR/config.json"
 VENV="$REPO/.venv"
 
-BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
+else
+  BOLD=''; DIM=''; GRN=''; YLW=''; RST=''
+fi
 
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; }
@@ -182,6 +186,7 @@ if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
   if [ ! -d "$VENV" ]; then
     make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
   fi
+  say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
   pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
   if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
     exec "$VENV/bin/mail-agent" setup "$@"

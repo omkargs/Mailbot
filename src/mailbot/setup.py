@@ -25,8 +25,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-BOLD = "\033[1m"; DIM = "\033[2m"; GRN = "\033[32m"
-YLW = "\033[33m"; RED = "\033[31m"; CYN = "\033[36m"; RST = "\033[0m"
+from .ui import BOLD, CYN, DIM, GRN, RED, RST, YLW
 
 
 def say(m: str = "") -> None: print(m, flush=True)
@@ -310,6 +309,17 @@ def step_telegram(state: dict[str, Any]) -> None:
         warn("no token — skipping Telegram")
         state["telegram"] = "skipped"
         return
+    # BotFather tokens look like 123456:ABCdef... — catch a pasted username
+    # or truncated copy BEFORE the network call fails cryptically.
+    import re as _re
+
+    if not _re.match(r"^\d+:[\w-]{30,}$", token):
+        warn("that doesn't look like a BotFather token (digits, a colon, ~35 chars)")
+        token = ask_secret("Bot token (again, carefully)")
+        if not token:
+            warn("no token — skipping Telegram")
+            state["telegram"] = "skipped"
+            return
     write_secret("TELEGRAM_BOT_TOKEN", token)
 
     info("3. Send your bot any message, then press Enter")

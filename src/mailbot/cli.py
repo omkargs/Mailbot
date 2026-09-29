@@ -509,9 +509,28 @@ def cmd_cal(args, cfg):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="mail-agent", description="Autonomous inbox agent")
+    import re as _re
+
+    from .ui import suggest_command
+
+    class _Parser(argparse.ArgumentParser):
+        def error(self, message):
+            m = _re.search(r"invalid choice: ([^ ]+)", message)
+            if m:
+                cmds = []
+                for a in self._actions:
+                    if isinstance(a, argparse._SubParsersAction):
+                        cmds = list(a.choices)
+                sug = suggest_command(m.group(1).strip("'\""), cmds)
+                if sug:
+                    message += ("\n\ndid you mean:\n" + "\n".join(
+                        f"  mail-agent {s}" for s in sug))
+            self.print_usage(sys.stderr)
+            self.exit(2, f"{self.prog}: error: {message}\n")
+
+    ap = _Parser(prog="mail-agent", description="Autonomous inbox agent")
     ap.add_argument("-v", "--verbose", action="store_true")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
     p = sub.add_parser("auth", help="authenticate configured providers")
     p.set_defaults(fn=cmd_auth)
@@ -652,6 +671,17 @@ def main() -> int:
     p.set_defaults(fn=_fn_profiles)
 
     args = ap.parse_args()
+    if not args.cmd:
+        # Bare run: concise help with the happy path first (clig.dev).
+        print("mail-agent — your inbox, on autopilot.")
+        print()
+        print("  mail-agent demo           see it work, zero credentials needed")
+        print("  mail-agent setup --fast   set up in ~60 seconds")
+        print("  mail-agent status         what it has done")
+        print("  mail-agent brief          the morning digest")
+        print()
+        print("Full help: mail-agent --help   Guide: SETUP.md")
+        return 2
     logging_setup.setup(logging.DEBUG if args.verbose else logging.INFO)
 
     from .storage import db as _db

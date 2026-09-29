@@ -25,10 +25,12 @@ def test_toggle_and_picked_values():
 
 
 def test_render_marks_cursor_and_selection():
+    from mailbot import ui as U
+
     m = Menu(["a", "b"])
     m.toggle()
     out = m.render("Pick:", multi=True)
-    assert "❯ [x] a" in out
+    assert f"{U.ARROW} [x] a" in out
     assert "  [ ] b" in out
     assert "space select" in out
 

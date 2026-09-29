@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import sys
 
+from .ui import ARROW
+
 _UP = ("\x1b[A", "k")
 _DOWN = ("\x1b[B", "j")
 
@@ -44,7 +46,7 @@ class Menu:
     def render(self, prompt: str, multi: bool = False) -> str:
         out = [prompt]
         for i, opt in enumerate(self.options):
-            arrow = "❯" if i == self.cursor else " "
+            arrow = ARROW if i == self.cursor else " "
             if multi:
                 box = "[x]" if i in self.selected else "[ ]"
                 out.append(f"{arrow} {box} {opt}")
