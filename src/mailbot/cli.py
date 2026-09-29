@@ -609,7 +609,15 @@ def main() -> int:
         return run_demo()
     p.set_defaults(fn=_fn_demo)
 
-    p = sub.add_parser("profiles", help="list inbox profiles (switching lands next)")
+    p = sub.add_parser("dossier", help="your persona, mined from your own mailbox")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--account", default="", help="inbox account (default: current profile)")
+    def _fn_dossier(a, c):
+        from .dossier import cmd_dossier
+        return cmd_dossier(a, c)
+    p.set_defaults(fn=_fn_dossier)
+
+    p = sub.add_parser("profiles", help="list inbox profiles")
     def _fn_profiles(a, c):
         from . import profiles as _profiles
         _profiles.ensure_migrated()
