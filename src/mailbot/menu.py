@@ -14,6 +14,7 @@ never hang — they get `default` / `[]` immediately.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 from .ui import ARROW
@@ -148,6 +149,31 @@ def _read_key(fd: int) -> str:
     return (b"\x1b" + rest).decode("utf-8", "replace")
 
 
+def _term_width() -> int:
+    try:
+        return max(20, os.get_terminal_size(sys.stdout.fileno()).columns)
+    except OSError:
+        try:
+            return max(20, shutil.get_terminal_size((80, 24)).columns)
+        except Exception:
+            return 80
+
+
+def _visual_height(frame: str, width: int) -> int:
+    """How many terminal rows `frame` occupies.
+
+    Counting '\\n' is wrong: a long menu line wraps to several rows, so the
+    frame occupies more rows than it has newlines. Redrawing by newline
+    count moved the cursor up too little, leaving the top of the old frame
+    on screen — frames then stacked on every keypress and the list smeared
+    sideways.
+    """
+    h = 0
+    for line in frame.split("\n"):
+        h += 1 if not line else -(-len(line) // width)   # ceil
+    return h
+
+
 def _run(menu: Menu, prompt: str, multi: bool):
     """Raw-mode loop. Returns cursor / selected set, None on abort.
 
@@ -159,7 +185,8 @@ def _run(menu: Menu, prompt: str, multi: bool):
     import tty
 
     fd = sys.stdin.fileno()
-    prev_lines = 0
+    width = _term_width()
+    prev_rows = 0
     try:
         old = termios.tcgetattr(fd)
     except termios.error:
@@ -168,13 +195,15 @@ def _run(menu: Menu, prompt: str, multi: bool):
         tty.setraw(fd)
         while True:
             frame = menu.render(prompt, multi)
-            lines = frame.count("\n") + 1
-            # Rewind over our own previous frame, then clear to end of it.
-            if prev_lines:
-                sys.stdout.write(f"\x1b[{prev_lines}A")
+            rows = _visual_height(frame, width)
+            # Rewind to the first row of our previous frame, clear below it,
+            # then repaint. Rewind is rows-1 because the cursor rests on the
+            # frame's last row once written.
+            if prev_rows:
+                sys.stdout.write(f"\x1b[{max(0, prev_rows - 1)}A\r")
             sys.stdout.write("\x1b[J" + frame)
             sys.stdout.flush()
-            prev_lines = lines
+            prev_rows = rows
 
             try:
                 key = _read_key(fd)

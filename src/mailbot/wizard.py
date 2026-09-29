@@ -519,26 +519,35 @@ def cmd_setup(args, cfg) -> int:
         from .menu import choose as _choose
 
         s = read_secrets()
-        if not s.get("ROUTER_BASE_URL") and not non_interactive and not fast and _tty():
-            prov = _choose(
-                "Where should the brain run?",
-                [label for label, _ in PROVIDER_CHOICES],
-                default=PROVIDER_CHOICES[0][0],
-            )
-            picked = provider_base_for(prov or "")
-            if picked:
-                write_secret("ROUTER_BASE_URL", picked)
-                if picked.startswith("http://localhost"):
-                    print("  Local gateway: run `litellm --port 4000 --model ollama/llama3`")
-                    print("  (plain Ollama alone won't work — Mailbot speaks the")
-                    print("   Anthropic protocol, LiteLLM translates)")
-            else:
-                try:
-                    custom = input("  Base URL (must be Anthropic-compatible): ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    custom = ""
-                if custom:
-                    write_secret("ROUTER_BASE_URL", D.normalise_base(custom))
+        # Always offer the provider picker when interactive. It was gated on
+        # ROUTER_BASE_URL being unset, so a second run silently skipped
+        # straight to models — the user could never switch providers without
+        # hand-editing the secrets file.
+        if not non_interactive and not fast and _tty():
+            current = s.get("ROUTER_BASE_URL", "")
+            labels = [l for l, _ in PROVIDER_CHOICES]
+            for i, (_lbl, url) in enumerate(PROVIDER_CHOICES):
+                if url and url == current:
+                    labels[i] = f"{_lbl}  (current)"
+            labels.append("Keep current" if current else "Skip for now")
+            prov = _choose("Where should the brain run?", labels,
+                           default="Keep current" if current else labels[0])
+            base_label = prov or "Keep current"
+            if not (base_label.startswith("Keep") or base_label.startswith("Skip")):
+                picked = provider_base_for(base_label)
+                if picked:
+                    write_secret("ROUTER_BASE_URL", picked)
+                    if picked.startswith("http://localhost"):
+                        print("  Local gateway: run `litellm --port 4000 --model ollama/llama3`")
+                        print("  (plain Ollama alone won't work — Mailbot speaks the")
+                        print("   Anthropic protocol, LiteLLM translates)")
+                else:
+                    try:
+                        custom = input("  Base URL (must be Anthropic-compatible): ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        custom = ""
+                    if custom:
+                        write_secret("ROUTER_BASE_URL", D.normalise_base(custom))
             s = read_secrets()
         base = (s.get("ROUTER_BASE_URL") or DEFAULTS["ROUTER_BASE_URL"]).strip()
         base = D.normalise_base(base)
@@ -579,11 +588,14 @@ def cmd_setup(args, cfg) -> int:
                     # Arrow-key model picker. No guessing model ids.
                     # Manual entry covers endpoints with no /models page.
                     # Prices shown when the endpoint reports them (OpenRouter).
-                    MANUAL = "Type it manually…"
+                    MANUAL = "✏  Type any model id…"
                     prices = D.list_pricing(base, key)
-                    labels, back = _labelled(ranked[:12], prices)
-                    pick = _choose("Pick the brain (best first, $in/$out per Mtok):",
-                                   labels + [MANUAL], default=labels[0])
+                    show = ranked if len(ranked) <= 12 else ranked[:12]
+                    labels, back = _labelled(show, prices)
+                    prompt = ("Pick the brain — arrows or type to search, "
+                              "enter to choose, or pick the last line to type "
+                              "your own id:")
+                    pick = _choose(prompt, labels + [MANUAL], default=labels[0])
                     if pick == MANUAL:
                         try:
                             typed = input("  Model id: ").strip()

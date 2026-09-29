@@ -66,3 +66,29 @@ def test_fallback_multi_pick(monkeypatch):
     monkeypatch.setattr(M, "_can_ansi", lambda: False)
     monkeypatch.setattr("builtins.input", lambda *a: "1,3")
     assert multi("P:", ["a", "b", "c"]) == ["a", "c"]
+
+
+def test_visual_height_accounts_for_wrapping():
+    """A line longer than the terminal wraps to extra rows.
+
+    Counting newlines undercounts, the rewind lands inside the old frame,
+    and frames stack. This is the bug that smeared the channel menu across
+    the whole screen.
+    """
+    from mailbot.menu import _visual_height
+
+    short = "a\nb\nc"
+    assert _visual_height(short, 80) == 3
+    # 25 chars at width 10 -> 3 visual rows
+    assert _visual_height("x" * 25, 10) == 3
+    # empty line still occupies a row
+    assert _visual_height("a\n\nb", 80) == 3
+    # exact multiple must not collapse to one row short
+    assert _visual_height("y" * 20, 10) == 2
+
+
+def test_rewind_never_exceeds_frame():
+    from mailbot.menu import _visual_height
+
+    frame = "p\na\nb"
+    assert max(0, _visual_height(frame, 80) - 1) == 2

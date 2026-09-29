@@ -201,30 +201,7 @@ fi
 [ "$PY" = "uv" ] && say "${DIM}Using uv-managed Python (>=3.11, auto-fetched)${RST}" \
   || say "${DIM}Using $PY ($("$PY" --version 2>&1))${RST}"
 
-# Boxed banner: the 5-second hello. Skippable with any key. Never shows
-# when output is piped, stdin is not a TTY, in fast/CI runs, or with
-# MAIL_AGENT_NO_SPLASH — branding must never slow automation.
-splash() {
-  case " $* " in
-    *" --fast "*|*" --yes "*|*" --non-interactive "*|*" --import-env "*|*" --dry-run "*|*" --step "*|*" --help "*|*" -h "*)
-      return 0 ;;
-  esac
-  [ -t 0 ] || return 0
-  [ -n "${MAIL_AGENT_NO_SPLASH:-}" ] && return 0
-  printf '\n%s\n' "${BOLD}┌──────────────────────────────────────────────────┐"
-  printf '%s\n' "│              __  __       _  _  _                 │"
-  printf '%s\n' "│             |  \/  |  __ _ (_)| |  ___ ___        │"
-  printf '%s\n' "│             | |\/| | / _\` || || | / _ / _ \       │"
-  printf '%s\n' "│             | |  | || (_| || || || (_) (_) |      │"
-  printf '%s\n' "│             |_|  |_| \__,_||_||_| \___/ \___/      │"
-  printf '%s\n' "├──────────────────────────────────────────────────┤"
-  printf '%s\n' "│  The inbox colleague that acts. MIT, yours.     │"
-  printf '%s%s\n' "└──────────────────────────────────────────────────┘" "$RST"
-  printf '%s\n' "${DIM}showing off for 5s — press any key to skip${RST}"
-  read -t 5 -n 1 -s -r _splash_key 2>/dev/null || true
-  printf '\n'
-}
-splash "${WIZ_ARGS[@]}"
+
 hdr()  { printf '\n%s▸ %s%s\n\n' "$BOLD" "$*" "$RST"; }
 
 # Secret input: visible=false, no default echo, no history.
