@@ -253,11 +253,33 @@ def cmd_setup(args, cfg) -> int:
         idx += 1
         _hdr(idx, "provider")
         from .agent import discovery as D
+        from .menu import choose as _choose
 
         s = read_secrets()
+        if not s.get("ROUTER_BASE_URL") and not non_interactive and not fast and _tty():
+            prov = _choose(
+                "Where should the brain run?",
+                ["Bynara router — combo models, cheapest (recommended)",
+                 "Anthropic direct — api.anthropic.com",
+                 "Custom Anthropic-compatible URL…"],
+                default="Bynara router — combo models, cheapest (recommended)",
+            )
+            if prov.startswith("Bynara"):
+                write_secret("ROUTER_BASE_URL", DEFAULTS["ROUTER_BASE_URL"])
+            elif prov.startswith("Anthropic"):
+                write_secret("ROUTER_BASE_URL", "https://api.anthropic.com")
+            else:
+                try:
+                    custom = input("  Base URL: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    custom = ""
+                if custom:
+                    write_secret("ROUTER_BASE_URL", D.normalise_base(custom))
+            s = read_secrets()
         base = (s.get("ROUTER_BASE_URL") or DEFAULTS["ROUTER_BASE_URL"]).strip()
         base = D.normalise_base(base)
         write_secret("ROUTER_BASE_URL", base)
+        print(f"  provider: {base}")
         key = s.get("ROUTER_API_KEY", "")
         model = s.get("ROUTER_MODEL", "") or DEFAULTS["ROUTER_MODEL"]
         if not key:
@@ -276,7 +298,13 @@ def cmd_setup(args, cfg) -> int:
             models = D.list_models(base, key) or []
             if model not in models and models:
                 ranked = D.rank(models)
-                model = ranked[0] if yes else model
+                if yes:
+                    model = ranked[0]
+                elif _tty():
+                    # Arrow-key model picker. No guessing model ids.
+                    pick = _choose("Pick the brain (best first):",
+                                   ranked[:12], default=ranked[0])
+                    model = pick or ranked[0]
                 write_secret("ROUTER_MODEL", model)
             res = D.probe(base, key, model)
             if res["ok"]:
@@ -286,12 +314,11 @@ def cmd_setup(args, cfg) -> int:
                 # is set. Offer it interactively; agents pass it via env.
                 existing_tri = s.get("ROUTER_TRIAGE_MODEL", "")
                 if not non_interactive and not fast and _tty() and models:
-                    try:
-                        ans = input("  Cheap triage model id (blank = off, "
-                                    "triage runs on the main model): ").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        ans = ""
-                    if ans and ans != model:
+                    opts = ["Off — main model does triage"] + \
+                        [m for m in D.rank(models) if m != model][:8]
+                    ans = _choose("Cheap triage model (sorts mail, flagship only thinks):",
+                                  opts, default=opts[0])
+                    if ans and not ans.startswith("Off"):
                         if ans in models:
                             write_secret("ROUTER_TRIAGE_MODEL", ans)
                             print(f"  triage model: {ans}")
@@ -324,9 +351,19 @@ def cmd_setup(args, cfg) -> int:
         creds = Path(fresh.google.credentials_file)
         if not creds.exists():
             print(f"  ! no client credentials at {creds}")
-            print("    create a Desktop-app OAuth client at "
-                  "https://console.cloud.google.com/apis/credentials")
-            print("    enable Gmail + Calendar APIs, download JSON, save it there.")
+            print("    Mailbot needs a Google OAuth client so it can read YOUR")
+            print("    mailbox with YOUR consent. 5 minutes, once:")
+            print("    1. Open  https://console.cloud.google.com/apis/credentials")
+            print("    2. Create a project (any name, e.g. mailbot)")
+            print("    3. Enable the Gmail API + the Calendar API")
+            print("       (APIs & Services → Library → search → Enable)")
+            print("    4. OAuth consent screen → External → fill name + email →")
+            print("       add yourself as a test user")
+            print("    5. Credentials → Create → OAuth client ID → Desktop app →")
+            print("       Download JSON")
+            print(f"    6. Save that file EXACTLY here (nothing else to do with it):")
+            print(f"         {creds}")
+            print("       Then re-run:  mail-agent setup --step google")
             state["google"] = "missing-creds"
         else:
             p = build_providers(fresh).get("google")
@@ -352,14 +389,20 @@ def cmd_setup(args, cfg) -> int:
         idx += 1
         _hdr(idx, "chat (optional)")
         if _tty():
-            try:
-                ans = input("  Set up Telegram now? [y/N]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                ans = ""
-            if ans.startswith("y"):
+            from .menu import multi as _multi
+
+            # Space to select, Enter when done. Telegram is the only fully
+            # interactive channel today; Discord/Slack take tokens via env
+            # (see SETUP.md) until their menu steps land.
+            picked = _multi("Talk to the bot where? (space = select)",
+                            ["Telegram — chat + approvals",
+                             "Skip for now"])
+            if any(p.startswith("Telegram") for p in picked):
                 from .setup import step_telegram
 
                 step_telegram(state)
+            else:
+                state.setdefault("telegram", "skipped")
         else:
             state.setdefault("telegram", "skipped")
     else:
