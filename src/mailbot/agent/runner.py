@@ -419,6 +419,19 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
                       detail=payload["subject"])
         if notify:
             notify(f"Sent: {payload['subject']}")
+        # Approval learning: two approvals in a row earns a one-time
+        # proposal — never silent auto-enable. Consent stays in chat.
+        if notify:
+            from . import learning as _learning
+
+            for addr in payload.get("to", []):
+                try:
+                    tip = _learning.maybe_suggest(account, addr)
+                except Exception:
+                    tip = None
+                if tip:
+                    notify(tip)
+                    break
     return {"ok": ok, "sent": ok}
 
 
