@@ -143,3 +143,39 @@ def test_import_env_picks_up_triage_model(monkeypatch, tmp_path):
     monkeypatch.setenv("ROUTER_TRIAGE_MODEL", "cheap/triage-1")
     assert "ROUTER_TRIAGE_MODEL" in W.import_env()
     assert S.read_secrets()["ROUTER_TRIAGE_MODEL"] == "cheap/triage-1"
+
+
+def test_looks_like_client_accepts_desktop_json():
+    import json as _json
+    from mailbot import wizard as W
+
+    blob = _json.dumps({"installed": {"client_id": "abc.apps.googleusercontent.com",
+                                      "client_secret": "s"}})
+    assert W._looks_like_client(blob) is True
+    assert W._looks_like_client('{"foo": 1}') is False
+    assert W._looks_like_client("not json {{{") is False
+    assert W._looks_like_client('["installed"]') is False
+
+
+def test_collect_credentials_json_pastes_and_chmods(monkeypatch, tmp_path):
+    import json as _json
+    from mailbot import wizard as W
+
+    dest = tmp_path / "sub" / "google-credentials.json"
+    blob = _json.dumps({"web": {"client_id": "abc", "client_secret": "s"}})
+    inputs = iter(blob.split("\n") + [""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
+    assert W.collect_credentials_json(dest) is True
+    assert _json.loads(dest.read_text())["web"]["client_id"] == "abc"
+    assert (dest.stat().st_mode & 0o777) == 0o600
+
+
+def test_collect_credentials_json_rejects_garbage(monkeypatch, tmp_path, capsys):
+    from mailbot import wizard as W
+
+    dest = tmp_path / "google-credentials.json"
+    inputs = iter(["hello world", ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
+    assert W.collect_credentials_json(dest) is False
+    assert not dest.exists()
+    assert "nothing written" in capsys.readouterr().out

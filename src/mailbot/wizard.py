@@ -200,6 +200,62 @@ def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> boo
     return True
 
 
+def collect_credentials_json(creds_path: Path) -> bool:
+    """Paste-the-JSON flow: no file juggling, no scp.
+
+    The user copies the OAuth client JSON in the Cloud Console (or opens
+    the downloaded file and copies its text), pastes it here, ends with a
+    blank line. Validated before writing: must parse and contain an
+    installed/web client_id. Never echoes the content back.
+    Returns True iff a valid file was stored (mode 600).
+    """
+    print("    Paste the OAuth client JSON below, then a blank line.")
+    print("    (Copy it from the downloaded file — Ctrl-C here to skip.)")
+    lines: list[str] = []
+    try:
+        while True:
+            line = input("    │ ")
+            if not line.strip():
+                break
+            if line.strip() == "END":
+                break
+            lines.append(line)
+            blob = "\n".join(lines)
+            if blob.count("{") <= blob.count("}") and _looks_like_client(blob):
+                break
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    blob = "\n".join(lines)
+    if not _looks_like_client(blob):
+        print("    ! that did not parse as an OAuth client JSON "
+              "(need installed/web with a client_id) — nothing written")
+        return False
+    try:
+        creds_path.parent.mkdir(parents=True, exist_ok=True)
+        creds_path.write_text(blob if blob.endswith("\n") else blob + "\n")
+        creds_path.chmod(0o600)
+    except OSError as e:
+        print(f"    ! could not write {creds_path}: {e}")
+        return False
+    print(f"    saved to {creds_path} (mode 600)")
+    return True
+
+
+def _looks_like_client(blob: str) -> bool:
+    try:
+        data = json.loads(blob)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    for section in ("installed", "web"):
+        part = data.get(section)
+        if isinstance(part, dict) and part.get("client_id"):
+            return True
+    return False
+
+
 def cmd_setup(args, cfg) -> int:
     import time as _time
 
@@ -361,11 +417,16 @@ def cmd_setup(args, cfg) -> int:
             print("       add yourself as a test user")
             print("    5. Credentials → Create → OAuth client ID → Desktop app →")
             print("       Download JSON")
-            print(f"    6. Save that file EXACTLY here (nothing else to do with it):")
+            print("    6. Paste it below OR save the file here and re-run:")
             print(f"         {creds}")
-            print("       Then re-run:  mail-agent setup --step google")
-            state["google"] = "missing-creds"
-        else:
+            if not non_interactive and _tty():
+                if collect_credentials_json(creds):
+                    fresh = _load()
+                    creds = Path(fresh.google.credentials_file)
+            if not creds.exists():
+                print("       Then re-run:  mail-agent setup --step google")
+                state["google"] = "missing-creds"
+        if creds.exists():
             p = build_providers(fresh).get("google")
             if p and p.valid():
                 print(f"  google OK: already signed in as {p.address}")
