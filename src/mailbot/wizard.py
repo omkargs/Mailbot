@@ -389,10 +389,35 @@ def cmd_setup(args, cfg) -> int:
                     model = ranked[0]
                 elif _tty():
                     # Arrow-key model picker. No guessing model ids.
+                    # Manual entry covers endpoints with no /models page.
+                    MANUAL = "Type it manually…"
                     pick = _choose("Pick the brain (best first):",
-                                   ranked[:12], default=ranked[0])
-                    model = pick or ranked[0]
+                                   ranked[:12] + [MANUAL], default=ranked[0])
+                    if pick == MANUAL:
+                        try:
+                            typed = input("  Model id: ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            typed = ""
+                        if typed:
+                            chk = D.probe(base, key, typed)
+                            if chk["ok"]:
+                                model = typed
+                            else:
+                                print(f"  ! that id failed ({chk['error'][:100]}); keeping {model}")
+                    elif pick:
+                        model = pick
                 write_secret("ROUTER_MODEL", model)
+            elif not models and not non_interactive and not fast and _tty():
+                # Endpoint lists nothing (or unreachable for listing) — let
+                # the user name their model instead of failing on a default
+                # id that was never theirs.
+                try:
+                    typed = input(f"  This endpoint lists no models. Model id [{model}]: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    typed = ""
+                if typed:
+                    model = typed
+                    write_secret("ROUTER_MODEL", model)
             res = D.probe(base, key, model)
             if res["ok"]:
                 print(f"  provider OK: {model} ({res['said']!r})" if res["said"] else f"  provider OK: {model}")
@@ -401,10 +426,16 @@ def cmd_setup(args, cfg) -> int:
                 # is set. Offer it interactively; agents pass it via env.
                 existing_tri = s.get("ROUTER_TRIAGE_MODEL", "")
                 if not non_interactive and not fast and _tty() and models:
+                    MANUAL = "Type it manually…"
                     opts = ["Off — main model does triage"] + \
-                        [m for m in D.rank(models) if m != model][:8]
+                        [m for m in D.rank(models) if m != model][:8] + [MANUAL]
                     ans = _choose("Cheap triage model (sorts mail, flagship only thinks):",
                                   opts, default=opts[0])
+                    if ans == MANUAL:
+                        try:
+                            ans = input("  Triage model id: ").strip() or "Off — main model does triage"
+                        except (EOFError, KeyboardInterrupt):
+                            ans = "Off — main model does triage"
                     if ans and not ans.startswith("Off"):
                         if ans in models:
                             write_secret("ROUTER_TRIAGE_MODEL", ans)
