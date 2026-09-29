@@ -596,3 +596,38 @@ def test_blank_key_gives_up_without_looping(monkeypatch, tmp_path, capsys):
     assert len(n) == 1, (f"probed {len(n)} times; the pre-flight result must be "
                         "reused and blank must stop immediately")
     assert "mail-agent setup --step provider" in out
+
+
+def test_first_party_endpoints_still_offer_real_model_ids():
+    """api.anthropic.com has no /v1/models, so discovery returns nothing.
+
+    The wizard's headline claim is "no guessing model ids" — and on the
+    single most obvious provider it used to silently fall through to a
+    hand-typed guess.
+    """
+    from mailbot.agent import discovery as D
+
+    anthropic = D.known_models("https://api.anthropic.com")
+    assert anthropic, "no fallback ids for api.anthropic.com"
+    assert all(isinstance(m, str) and m for m in anthropic)
+    assert any(m.startswith("claude-") for m in anthropic)
+
+    assert D.known_models("https://api.openai.com")
+    assert D.known_models("https://generativelanguage.googleapis.com")
+    # An unknown host gets nothing rather than a wrong guess.
+    assert D.known_models("https://router.example.invalid") == []
+    # Trailing /v1 and case must not defeat the match.
+    assert D.known_models("https://API.Anthropic.com/v1")
+
+
+def test_list_models_falls_back_to_the_allowlist(monkeypatch):
+    """A 404 from /models must not mean 'no models exist'."""
+    import urllib.error
+    from mailbot.agent import discovery as D
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("u", 404, "nope", None, None)
+
+    monkeypatch.setattr(D.urllib.request, "urlopen", boom)
+    got = D.list_models("https://api.anthropic.com", "sk-x")
+    assert got and any(m.startswith("claude-") for m in got)

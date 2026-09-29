@@ -110,6 +110,27 @@ Scopes requested (`src/mailbot/providers/gmail.py`): `gmail.modify`,
    (`ssh -L 8080:localhost:8080 user@host`) or auth on your laptop and copy
    `~/.config/mail-agent/google-token.json` to the server.
 
+   On a box with no browser at all, get just the URL and nothing else:
+
+   ```bash
+   mail-agent setup --step google --print-auth-url
+   ```
+
+   Open it anywhere, approve, then paste what you get back — the bare code
+   or the whole redirected URL both work. Auth codes are **single-use**; if
+   one is rejected, approve again for a fresh one rather than pasting the
+   same code twice.
+
+   **If you get `access_denied` after doing every step above**, the consent
+   screen is still in *Testing*, which only admits the accounts you added
+   as test users. That is the one gate Google's own walkthrough buries:
+
+   <https://console.cloud.google.com/apis/credentials/consent> →
+   Publishing status → **In production** (no review needed while Testing).
+
+   Google requires a human to click Approve. No tool can automate that
+   without storing your credentials, so this one step is yours.
+
 ## Files
 
 - Secrets: `~/.config/mail-agent/.secrets` (mode 600, never logged/committed).
@@ -189,6 +210,9 @@ these into that file so they survive a reboot.
 | `AGENT_BREAKER_THRESHOLD` | `5` | Failures before the circuit opens. |
 | `AGENT_MAX_DRAFTS` | `40` | Cap per run. |
 | `AGENT_BRIEF_HOUR` | `7` | Morning brief, local time. |
+| `AGENT_FETCH_LIMIT` | `30` | Messages pulled in per run. Lower it on a slow or local provider — a big batch is what makes a run time out. |
+| `AGENT_BODY_PREFETCH` | `12` | Full bodies inlined into the prompt. These are what make a run long. |
+| `AGENT_FIRST_RUN_DAYS` | `7` | On the **first** run only, ignore mail older than this. With no cursor "everything new" means your entire mailbox, and an agent's first action should be near-invisible. Set `0` to sweep everything. |
 | `AGENT_WARN_SPEND_PCT` | `80` | Warn at this share of the cap. |
 | `MAIL_AGENT_BRAIN` | `./brain` | Where voice profiles live. |
 
@@ -199,6 +223,20 @@ stops for your review. Matched three ways — raw text, de-obfuscated (leet,
 zero-width), and spaceless — so `p a s s w o r d` and `p.a.s.s.w.o.r.d` both
 trip it. Adding a word makes the agent more cautious; removing one makes it
 more autonomous.
+
+## Look before it acts
+
+```bash
+mail-agent scan --dry-run     # the batch, and every gate that would fire
+mail-agent explain <id>       # why this one message would be held
+```
+
+`--dry-run` sends nothing, files nothing, drafts nothing, marks nothing
+read, moves no cursor and records no run. It cannot tell you what the
+model *will* decide — that is the model's call — but it shows which mail
+it would see and which of your own safety gates fire on each. Given that
+the first run used to sweep the whole mailbox, look before you point it
+at a real inbox.
 
 ## Uninstalling
 

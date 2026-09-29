@@ -49,6 +49,36 @@ def normalise_base(url: str) -> str:
     return re.sub(r"/v1$", "", u)
 
 
+# Endpoints with no /v1/models to ask. api.anthropic.com has no such route
+# at all - discovery returns None, and the wizard fell through to a
+# hand-typed guess on the single most obvious provider. A static list is
+# the honest answer: these ids are real, they are just not discoverable.
+# probe() still verifies whatever is chosen, so a stale entry fails loudly
+# rather than silently.
+KNOWN_MODELS: dict[str, list[str]] = {
+    "api.anthropic.com": [
+        "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
+        "claude-opus-4-1", "claude-sonnet-4-0",
+    ],
+    "api.openai.com": [
+        "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4o",
+    ],
+    "generativelanguage.googleapis.com": [
+        "gemini-2.5-pro", "gemini-2.5-flash",
+    ],
+    "openrouter.ai": [],          # it does have /models; keep asking
+}
+
+
+def known_models(base_url: str) -> list[str]:
+    """Static fallback for endpoints that publish no model list."""
+    b = (normalise_base(base_url) or "").lower()
+    for host, ids in KNOWN_MODELS.items():
+        if host in b:
+            return list(ids)
+    return []
+
+
 def list_models(base_url: str, api_key: str) -> list[str] | None:
     """Ask the endpoint which models it has. None if it will not say."""
     base = normalise_base(base_url)
@@ -74,7 +104,10 @@ def list_models(base_url: str, api_key: str) -> list[str] | None:
         ids = _extract(data)
         if ids:
             return ids
-    return None
+    # Nothing to ask. Fall back to what we know about this host, so the
+    # picker offers real ids instead of the user guessing one.
+    fb = known_models(base_url)
+    return fb or None
 
 
 def _extract(data: Any) -> list[str]:
