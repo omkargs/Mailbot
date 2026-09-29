@@ -75,7 +75,13 @@ def run_once(
     trigger: str = "scan",
     notify=None,
     messages: list[dict[str, Any]] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
+    """One agent pass over the pending messages for an account.
+
+    `model` is the profile override — the flagship for this inbox. None
+    means the global model (legacy path, unchanged).
+    """
     """One agent pass over the pending messages for an account."""
     usage = db.usage_today()
     if usage["input_tokens"] + usage["output_tokens"] >= cfg.agent.daily_token_cap:
@@ -84,7 +90,7 @@ def run_once(
             notify("Token cap for today reached. No mail processed.")
         return {"status": "capped"}
 
-    run_id = db.start_run(account, trigger, cfg.router.model)
+    run_id = db.start_run(account, trigger, model or cfg.router.model)
     client = build_client(cfg.router)
     # Email-driven: standing authority changes are refused in this context.
     box = ToolBox(provider, cfg, run_id, notify=notify, allow_permission_change=False)
@@ -154,7 +160,7 @@ def run_once(
     completed = False
     for _ in range(MAX_ITERATIONS):
         resp = guarded_call(client, 
-            model=cfg.router.model,
+            model=model or cfg.router.model,
             max_tokens=cfg.router.max_tokens,
             system=system,
             tools=_cached_tool_list(),
@@ -283,13 +289,15 @@ def advance_cursor(provider: MailProvider) -> None:
         db.set_cursor(provider.account, "inbox", row["id"])
 
 
-def scan(provider: MailProvider, cfg: Config, notify=None) -> dict[str, Any]:
+def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = None,
+         profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Full cycle: fetch, run the agent, and only then advance the cursor."""
     new = fetch_new(provider)
     if not new:
         return {"status": "empty", "new": 0}
     log.info("%s: %d new messages", provider.account, len(new))
-    res = run_once(provider.account, provider, cfg, trigger="scan", notify=notify, messages=new)
+    res = run_once(provider.account, provider, cfg, trigger="scan", notify=notify, messages=new,
+                   model=model)
     # Advance only on a clean run so a crash does not swallow pending mail.
     if res.get("status") == "ok":
         advance_cursor(provider)
@@ -298,17 +306,20 @@ def scan(provider: MailProvider, cfg: Config, notify=None) -> dict[str, Any]:
     # operator hears nothing at all when the agent escalated something, which
     # is exactly the moment they most need to know.
     if notify and res.get("status") == "ok":
+        from ..profiles import header_for
+
+        tag = header_for(profile, provider.address if hasattr(provider, "address") else "")
         st = res.get("stats", {})
         escalated = st.get("escalated", 0)
         summary = (res.get("summary") or "").strip()
         if escalated:
             head = f"{escalated} thing{'s' if escalated != 1 else ''} need you"
             body = f"\n\n{summary}" if summary else ""
-            notify(f"{head}{body}")
+            notify(f"{tag} {head}{body}" if tag else f"{head}{body}")
         elif not st.get("sent") and not st.get("drafted") and summary:
             # Only chatter when the agent judged something worth saying.
             if len(summary) > 20 and not summary.lower().startswith(("no ", "nothing ")):
-                notify(summary)
+                notify(f"{tag} {summary}" if tag else summary)
     return res
 
 

@@ -73,15 +73,18 @@ def cmd_scan(args, cfg):
         return 1
     notifier = build_notifiers(cfg)
     total = {"new": 0, "sent": 0, "drafted": 0, "escalated": 0}
-    for name, p in providers.items():
-        res = runner.scan(p, cfg, notify=notifier.send)
+    from . import profiles as _profiles
+    for prof, p in _profiles.active(cfg, providers):
+        model = _profiles.model_for(prof, cfg.router.model)
+        res = runner.scan(p, cfg, notify=notifier.send, model=model, profile=prof)
         total["new"] += res.get("new", 0)
         st = res.get("stats", {})
         total["sent"] += st.get("sent", 0)
         total["drafted"] += st.get("drafted", 0)
         total["escalated"] += st.get("escalated", 0)
         if res.get("summary"):
-            print(f"[{name}] {res['summary']}")
+            tag = _profiles.header_for(prof, getattr(p, "address", ""))
+            print(f"[{tag or p.account}] {res['summary']}")
     print(json.dumps(total, indent=2))
     return 0
 
@@ -238,8 +241,13 @@ def cmd_daemon(args, cfg):
         return _providers(cfg)
 
     def scan_cycle():
-        for p in providers_factory().values():
-            runner.scan(p, cfg, notify=notifier.send)
+        from . import profiles as _profiles
+
+        provs = providers_factory()
+        for prof, p in _profiles.active(cfg, provs):
+            runner.scan(p, cfg, notify=notifier.send,
+                        model=_profiles.model_for(prof, cfg.router.model),
+                        profile=prof)
 
     # One listener for the process: reusing it keeps the getUpdates offset and
     # the seen-set consistent, and avoids a second poll each cycle.
@@ -600,6 +608,31 @@ def main() -> int:
         from .demo import run_demo
         return run_demo()
     p.set_defaults(fn=_fn_demo)
+
+    p = sub.add_parser("profiles", help="list inbox profiles (switching lands next)")
+    def _fn_profiles(a, c):
+        from . import profiles as _profiles
+        _profiles.ensure_migrated()
+        rows = _profiles.list_profiles()
+        if not rows:
+            print("no profiles yet — run `mail-agent setup`")
+            return 1
+        cur = _profiles.get_current()
+        for r in rows:
+            mark = "●" if cur and r["id"] == cur["id"] else "○"
+            addr = ""
+            try:
+                from .storage import db as _db
+                with _db.db() as _c:
+                    arow = _c.execute("SELECT address FROM accounts WHERE id=?",
+                                      (r["account"],)).fetchone()
+                    addr = (arow["address"] or "") if arow else ""
+            except Exception:
+                pass
+            model = (r.get("model_override") or "").strip() or "(first provider)"
+            print(f"  {mark} {r['name']:<16} {addr or r['account']:<28} model: {model}")
+        return 0
+    p.set_defaults(fn=_fn_profiles)
 
     args = ap.parse_args()
     logging_setup.setup(logging.DEBUG if args.verbose else logging.INFO)
