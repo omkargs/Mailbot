@@ -609,6 +609,12 @@ def main() -> int:
         return run_demo()
     p.set_defaults(fn=_fn_demo)
 
+    p = sub.add_parser("mcp", help="serve the mailbox as MCP tools over stdio")
+    def _fn_mcp(a, c):
+        from .mcp_server import cmd_mcp
+        return cmd_mcp(a, c)
+    p.set_defaults(fn=_fn_mcp)
+
     p = sub.add_parser("dossier", help="your persona, mined from your own mailbox")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--account", default="", help="inbox account (default: current profile)")

@@ -81,7 +81,7 @@ class FakeProvider:
         return next((m for m in self.inbox if m["id"] == message_id), None)
     def get_thread(self, thread_id):
         return [m for m in self.inbox if m["thread_id"] == thread_id]
-    def search(self, query="", sender="", subject="", since="", limit=25):
+    def search(self, query="", sender="", subject="", since="", limit=25, full=False):
         return self.inbox[:limit]
     def apply_label(self, message_id, label_id, add=True): return True
     def mark_read(self, message_id, read=True): return True
