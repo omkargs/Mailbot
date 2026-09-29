@@ -200,6 +200,73 @@ def decide(
     return Decision(True, "approved contact, no escalation signals", "low", signals)
 
 
+def explain(
+    sender: str,
+    subject: str,
+    body: str,
+    account: str,
+    cfg: AgentConfig,
+    account_auto_send: bool,
+    contact_auto_send: bool = False,
+    attachments: bool = False,
+    is_reply_to_unknown: bool = False,
+    is_established_thread: bool = False,
+) -> list[str]:
+    """Every gate that fires, in order — not just the first one.
+
+    decide() returns at the first block on purpose: for a send, one reason
+    is enough and the order is a security property. For a person asking
+    "why would this be held?", the first gate is the least interesting one
+    - it is usually just "auto-send is off for this account" - and it hides
+    the injection signals and escalation keywords behind it.
+
+    This evaluates the same gates without short-circuiting, so the preview
+    can show the whole picture. It cannot and does not change decide().
+    """
+    addr = normalize_address(sender)
+    out: list[str] = []
+    hay = f"{subject}\n{body}"
+
+    if cfg.send_mode == "never":
+        out.append("send_mode=never — the agent may not send at all")
+
+    if addr in {normalize_address(a) for a in cfg.never_auto_send}:
+        out.append(f"{addr} is on the never-auto-send list")
+
+    if not account_auto_send:
+        out.append(f"auto-send is off for account '{account}'")
+
+    allowed = {normalize_address(a) for a in cfg.auto_send_contacts}
+    if not (contact_auto_send or addr in allowed or is_established_thread):
+        out.append(f"{addr} has not been approved for unattended replies")
+
+    inj = detect_injection(hay)
+    if inj:
+        out.append(f"prompt-injection signals in content: {len(inj)} "
+                   f"({', '.join(inj[:3])})")
+
+    hay_raw = hay.lower()
+    hay_norm = normalise_for_detection(hay)
+    hay_flat = re.sub(r"[\s.\-_]+", "", hay_norm)
+    hits = []
+    for k in cfg.escalation_keywords:
+        kl = k.lower()
+        kl_flat = re.sub(r"[\s.\-_]+", "", kl)
+        if kl in hay_raw or kl in hay_norm or kl_flat in hay_flat:
+            hits.append(k)
+    if hits:
+        out.append(f"escalation keyword(s) present — {', '.join(hits[:4])}")
+
+    if attachments:
+        out.append("outbound message would carry attachments")
+    if is_reply_to_unknown:
+        out.append("reply to a contact with no prior thread")
+    if len(body.split()) < 4:
+        out.append("body too short to have been individually written")
+
+    return out
+
+
 def can_calendar_write(action: str, cfg_calendar_enabled: bool) -> bool:
     """Creates are auto-allowed; deletes and modifications always need the user."""
     if not cfg_calendar_enabled:

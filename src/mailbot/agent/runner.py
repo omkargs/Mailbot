@@ -351,6 +351,66 @@ def advance_cursor(provider: MailProvider, ids: list[str] | None = None) -> None
         db.set_cursor(provider.account, "inbox", row["id"])
 
 
+def preview(provider: MailProvider, cfg: Config, profile: dict[str, Any] | None = None
+            ) -> dict[str, Any]:
+    """What WOULD this run do. Touches nothing.
+
+    The real decision is the model's, so this cannot claim to know it.
+    What it can do is show the batch it would send, and run every local
+    guard over each message - the escalation keywords, the injection
+    signals, the send gate - so you can see which mail is going to stop
+    for a human before it stops for one.
+
+    No model call, no archive, no draft, no cursor movement.
+    """
+    new = fetch_new(provider, cfg=cfg)
+    if not new:
+        return {"status": "empty", "items": []}
+
+    na = guards.normalize_address
+    acct_auto = bool(getattr(cfg.google, "auto_send", False))
+    contact_auto = {na(a) for a in cfg.agent.auto_send_contacts}
+    never = {na(a) for a in cfg.agent.never_auto_send}
+
+    items = []
+    for m in new:
+        sender = m.get("sender", "")
+        body = m.get("body") or m.get("snippet") or ""
+        d = guards.decide(
+            sender=sender, subject=m.get("subject", ""), body=body,
+            account=provider.account, cfg=cfg.agent,
+            account_auto_send=acct_auto,
+            contact_auto_send=na(sender) in contact_auto,
+        )
+        every = guards.explain(
+            sender=sender, subject=m.get("subject", ""), body=body,
+            account=provider.account, cfg=cfg.agent,
+            account_auto_send=acct_auto,
+            contact_auto_send=na(sender) in contact_auto,
+        )
+        items.append({
+            "id": m.get("id", ""),
+            "sender": sender,
+            "subject": m.get("subject", "")[:80],
+            "date": m.get("date", ""),
+            "would_send": d.allowed,
+            "reason": d.reason,
+            "severity": d.severity,
+            "signals": d.signals,
+            # The full picture, not just whichever gate fired first.
+            "all_reasons": every,
+            "never_listed": na(sender) in never,
+            "chars": len(body),
+        })
+    return {
+        "status": "preview",
+        "account": provider.account,
+        "count": len(items),
+        "blocked": sum(1 for i in items if not i["would_send"]),
+        "items": items,
+    }
+
+
 def first_run_window(provider: MailProvider) -> bool:
     """True when this account has never completed a run (no cursor yet)."""
     return not db.get_cursor(provider.account, "inbox")

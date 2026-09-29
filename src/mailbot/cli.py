@@ -64,6 +64,88 @@ def cmd_auth(args, cfg):
     return 0
 
 
+def _cmd_scan_dry_run(args, cfg, providers):
+    """Show what a scan would do, and touch nothing.
+
+    The model's actual decision is unknowable in advance; what this shows
+    is the batch and every local gate that would fire, so the mail that
+    stops for a human is visible before it stops for one.
+    """
+    from . import profiles as _profiles
+
+    for prof, p in _profiles.active(cfg, providers):
+        res = runner.preview(p, cfg, profile=prof)
+        if res.get("status") == "empty":
+            print(f"[{prof.get('name', p.account) or p.account}] nothing new.")
+            continue
+        print(f"\n[{res['account']}] {res['count']} message(s) would be triaged, "
+              f"{res['blocked']} would stop for you.")
+        print("  (preview only — nothing sent, filed, drafted or marked read)\n")
+        for it in res["items"]:
+            mark = "SEND " if it["would_send"] else "HOLD "
+            print(f"  {mark}{it['sender']}")
+            if it["subject"]:
+                print(f"        {it['subject']}")
+            for r in (it.get("all_reasons") or [it["reason"]]):
+                print(f"        · {r}")
+            print()
+    return 0
+
+
+def cmd_explain(args, cfg):
+    """Why would this message be held? Which gate fires, in what order."""
+    providers = _providers(cfg)
+    if not providers:
+        print("No authenticated accounts.")
+        return 1
+    from .agent import guards
+    from .storage import db as _db
+
+    mid = args.message_id
+    row = None
+    with _db.db() as c:
+        row = c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+    if not row:
+        print(f"No stored message with id {mid!r}.")
+        print("  Ids look like 19fda0eb83f4805e and change per mailbox.")
+        return 1
+    provider = next((p for p in providers if p.account == row["account"]), None)
+    if provider is None:
+        print(f"No provider for account {row['account']}.")
+        return 1
+
+    m = dict(row)
+    m.setdefault("sender", row["sender"])
+    body = m.get("body") or ""
+    if not body:
+        full = provider.get_message(mid) or {}
+        body = full.get("body", "")
+
+    na = guards.normalize_address
+    contact_auto = na(m.get("sender", "")) in {na(a) for a in cfg.agent.auto_send_contacts}
+    d = guards.decide(
+        sender=m.get("sender", ""), subject=m.get("subject", ""), body=body,
+        account=row["account"], cfg=cfg.agent,
+        account_auto_send=bool(getattr(cfg.google, "auto_send", False)),
+        contact_auto_send=contact_auto,
+    )
+    print(f"  from     {m.get('sender','')}")
+    print(f"  subject  {m.get('subject','')}")
+    print(f"  date     {m.get('date','')}")
+    print(f"  id       {mid}")
+    print()
+    print(f"  verdict  {'would send unattended' if d.allowed else 'would stop for you'}")
+    print(f"  reason   {d.reason}")
+    print(f"  severity {d.severity}")
+    if d.signals:
+        print(f"  signals  {', '.join(d.signals)}")
+    print()
+    print("  The gates run in order, and each one found can only make the")
+    print("  answer stricter. This is code, not a prompt — a clever model")
+    print("  cannot talk past it.")
+    return 0
+
+
 def cmd_scan(args, cfg):
     if args.capped:
         cfg.agent.daily_token_cap = 0
@@ -71,6 +153,8 @@ def cmd_scan(args, cfg):
     if not providers:
         print("No authenticated accounts.")
         return 1
+    if getattr(args, "dry_run", False):
+        return _cmd_scan_dry_run(args, cfg, providers)
     notifier = build_notifiers(cfg)
     total = {"new": 0, "sent": 0, "drafted": 0, "escalated": 0}
     from . import profiles as _profiles
@@ -548,8 +632,14 @@ def main() -> int:
     p.set_defaults(fn=cmd_auth)
 
     p = sub.add_parser("scan", help="process new mail once")
-    p.add_argument("--capped", action="store_true", help="dry run: no sends at all")
+    p.add_argument("--capped", action="store_true", help="no sends at all")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would happen; send, file and draft nothing")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("explain", help="why would this message be held?")
+    p.add_argument("message_id")
+    p.set_defaults(fn=cmd_explain)
 
     p = sub.add_parser("brain", help="rebuild the style profile from sent mail")
     p.add_argument("--limit", type=int, default=300,
