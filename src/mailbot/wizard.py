@@ -167,104 +167,253 @@ def ensure_config_json() -> Path:
     return p
 
 
-def _run_loopback_once(flow, port: int = 8080, timeout: int = 60):
-    """run_local_server with a guillotine. The oauthlib call blocks until
-    the browser callback arrives — forever, on a box with no browser. The
-    SIGALRM fires in the main thread only; elsewhere we attempt without a
-    net (still better than hanging the process lifetime)."""
-    import signal
+# Google deleted the out-of-band OAuth flow in 2022. The old code still
+# asked for redirect_uri=urn:ietf:wg:oauth:2.0:oob, so the headless path was
+# dead and failed late - after the user had built a project, enabled two
+# APIs, downloaded a JSON and approved a consent screen. The SDK is no
+# help here either: InstalledAppFlow with redirect_uris:["http://localhost"]
+# emits a consent URL with no redirect_uri at all (400 invalid_request), and
+# passing one explicitly raises "prepare_request_body() got multiple values".
+# So we build the URL and exchange the code ourselves. Thirty lines, no
+# surprise, and the same redirect_uri goes into both halves.
+_GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
+_GOOGLE_REDIRECT = "http://localhost"
+
+
+def _google_client(creds_path: Path) -> tuple[str, str]:
+    """(client_id, client_secret) from a Google OAuth client JSON."""
+    blob = json.loads(Path(creds_path).read_text(encoding="utf-8"))
+    inner = blob.get("installed") or blob.get("web") or blob
+    return inner.get("client_id", ""), inner.get("client_secret", "")
+
+
+def _consent_url(client_id: str, scopes, redirect_uri: str = _GOOGLE_REDIRECT) -> str:
+    from urllib.parse import urlencode
+
+    return _GOOGLE_AUTH + "?" + urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(scopes),
+        "access_type": "offline",       # ask for a refresh token
+        "prompt": "consent",            # and re-issue one every time
+        "include_granted_scopes": "true",
+    })
+
+
+def _exchange_code(client_id: str, client_secret: str, code: str,
+                   redirect_uri: str = _GOOGLE_REDIRECT) -> dict:
+    """Swap an auth code for tokens. The SAME redirect_uri must go back."""
+    import httpx
+
+    r = httpx.post(_GOOGLE_TOKEN, data={
+        "code": code, "client_id": client_id, "client_secret": client_secret,
+        "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+    }, timeout=30.0)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("error_description") or r.json().get("error")
+        except Exception:
+            detail = r.text[:120]
+        raise RuntimeError(f"{detail}")
+    return r.json()
+
+
+def _code_from_paste(raw: str) -> str:
+    """Accept a bare code OR the whole redirected URL.
+
+    People paste what is in the address bar far more often than the code
+    alone, and rejecting that wastes a single-use auth code.
+    """
+    raw = (raw or "").strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        from urllib.parse import parse_qs, urlparse
+
+        q = parse_qs(urlparse(raw).query)
+        return (q.get("code") or [""])[0]
+    return raw
+
+
+def _loopback_code(port: int, timeout: int) -> str:
+    """Serve one callback on 127.0.0.1 and return the code. Hard timeout."""
     import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    if threading.current_thread() is not threading.main_thread():
-        return flow.run_local_server(
-            port=port, open_browser=False, authorization_prompt_message="",
-            success_message="Approved — return to the terminal.")
+    box: dict[str, str] = {}
 
-    class _Timeout(Exception):
-        pass
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):                       # noqa: N802
+            code = _code_from_paste(f"http://x{self.path}")
+            box["code"] = code
+            err = "error" in self.path
+            self.send_response(400 if err else 200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                (b"<h1>Denied</h1>" if err else
+                 b"<h1>Mailbot is connected.</h1>You can close this tab.")
+            )
+            self.server.done = True
 
-    def _alarm(signum, frame):
-        raise _Timeout()
+        def log_message(self, *a):
+            pass
 
-    old = signal.signal(signal.SIGALRM, _alarm)
-    signal.alarm(timeout)
+    srv = HTTPServer(("127.0.0.1", port), _H)
+    srv.done = False
+
+    def _serve():
+        import time as _t
+        deadline = _t.time() + timeout
+        srv.timeout = 1
+        while not srv.done and _t.time() < deadline:
+            srv.handle_request()
+
+    th = threading.Thread(target=_serve, daemon=True)
+    th.start()
     try:
-        return flow.run_local_server(
-            port=port, open_browser=False, authorization_prompt_message="",
-            success_message="Approved — return to the terminal.")
-    except _Timeout as e:
-        raise TimeoutError(f"no browser callback in {timeout}s") from e
+        th.join(timeout + 1)
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
+        srv.server_close()
+    if not box.get("code"):
+        raise TimeoutError(f"no browser callback in {timeout}s")
+    return box["code"]
+
+
+def _write_google_token(out: Path, info: dict, client_id: str,
+                        client_secret: str, scopes) -> None:
+    """Store a token in exactly the shape google-auth reads back."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": info.get("refresh_token", ""),
+        "token": info.get("access_token", ""),
+        "token_uri": _GOOGLE_TOKEN,
+        "scopes": list(scopes),
+        "universe_domain": "googleapis.com",
+    }
+    out.write_text(json.dumps(payload, indent=2))
+    out.chmod(0o600)
+
+
+def _portable(creds_path: Path, port: int = 0) -> str:
+    """Just the consent URL, for scripts and headless boxes."""
+    from .providers.gmail import SCOPES
+
+    cid, _ = _google_client(creds_path)
+    if not cid:
+        raise RuntimeError("no client_id in that credentials file")
+    return _consent_url(cid, SCOPES)
+
+
+_PUBLISHING_NOTE = """\
+  ┌ the one step Google's own docs bury ─────────────────────────┐
+  │ If the consent screen says "Testing", only the accounts you   │
+  │ added as test users can connect — and yours will 403 with     │
+  │ access_denied even though you followed every step above.       │
+  │                                                               │
+  │ Fix:  https://console.cloud.google.com/apis/credentials/consent│
+  │   → Publishing status → "In production" (no review needed     │
+  │     while the app is in Testing), then re-run.                 │
+  └───────────────────────────────────────────────────────────────┘"""
+
+
+def _note_publishing_status() -> None:
+    """Warn about the 403 that a perfect setup still produces."""
+    print(_PUBLISHING_NOTE)
 
 
 def headless_google_auth(creds_path: Path, out_token: Path | None = None) -> bool:
-    """OAuth without requiring a local browser.
+    """OAuth without requiring a local browser on this machine.
 
-    1. Builds the consent URL and prints it (open on any device).
-    2. Runs a loopback server when possible; falls back to paste-the-code.
-    Returns True iff a valid token was stored.
+    1. Prints a consent URL that works on ANY device.
+    2. Tries a loopback callback for `timeout` seconds (works over
+       `ssh -L PORT:localhost:PORT`).
+    3. Otherwise takes a pasted code or pasted redirect URL.
+
+    Every step is honest about what it can and cannot do: Google requires
+    a human to click Approve. There is no way around that, and any tool
+    claiming otherwise is either lying or storing your credentials.
     """
-    from google_auth_oauthlib.flow import InstalledAppFlow
-
     from .providers.gmail import SCOPES
 
     out = out_token or Path(os.environ.get("MAIL_AGENT_TOKEN",
                                            str(config_dir() / "google-token.json")))
-    # Step 1: always show the URL first so the user can act while we listen.
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
     try:
-        url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+        client_id, client_secret = _google_client(creds_path)
     except Exception as e:
-        print(f"  could not build consent URL: {type(e).__name__}")
+        print(f"  could not read that credentials file: {type(e).__name__}")
         return False
+    if not client_id:
+        print("  no client_id in that file — is it a Google OAuth client JSON?")
+        return False
+
+    port = _free_port()
+    url = _consent_url(client_id, SCOPES, f"http://localhost:{port}")
     print("\n  Open this URL on ANY device (phone/laptop), approve, continue:")
     print(f"\n  {url}\n")
+    print(f"  It will land on http://localhost:{port} — that is expected.")
+    print("  On this box, forward it with:")
+    print(f"    ssh -L {port}:localhost:{port} <this-host>")
 
-    # Step 2: one loopback attempt with a hard timeout. run_local_server
-    # blocks FOREVER waiting for the browser callback — on an SSH box with
-    # no forwarding that used to hang with zero explanation. Now: 60s,
-    # then straight to paste-the-code. Works over `ssh -L 8080:localhost:8080`.
+    _note_publishing_status()
     if _tty():
-        print("  Waiting up to 60s for the browser callback…")
-        print("  (remote box? use: ssh -L 8080:localhost:8080 <host>)")
-        print("  Ctrl-C skips straight to paste-the-code.")
+        print(f"\n  Waiting up to 60s for the callback…  Ctrl-C to paste a code instead.")
     try:
-        flow2 = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
-        creds = _run_loopback_once(flow2, port=8080, timeout=60)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(creds.to_json())
-        out.chmod(0o600)
-        print("  token stored (mode 600)")
-        return True
+        code = _loopback_code(port, timeout=60)
+        print("  got the callback")
     except KeyboardInterrupt:
-        print("\n  skipped the wait — paste the code instead.")
+        print("\n  stopped waiting — paste the code instead.")
+        code = ""
     except Exception as e:
         log.debug("loopback auth failed: %s", type(e).__name__)
+        code = ""
 
-    # Step 3: manual code paste (old Desktop clients still honour OOB-ish copy).
-    if not _tty():
-        print("  no browser flow completed and stdin is not a TTY — "
-              "re-run with a terminal to paste the code, or auth locally "
-              "and copy google-token.json up.")
-        return False
-    try:
-        code = input("  Paste the code here (blank to skip): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return False
+    if not code:
+        if not _tty():
+            print("  no callback and stdin is not a TTY. On a headless box run:")
+            print("    mail-agent setup --step google --print-auth-url")
+            print("  open the URL anywhere, then come back and paste what you got.")
+            return False
+        try:
+            code = _code_from_paste(
+                input("  Paste the code, or the whole redirected URL (blank to skip): "))
+        except (EOFError, KeyboardInterrupt):
+            return False
     if not code:
         return False
+
     try:
-        flow.fetch_token(code=code)
+        info = _exchange_code(client_id, client_secret, code, f"http://localhost:{port}")
     except Exception as e:
-        print(f"  code rejected: {str(e)[:140]}")
+        msg = str(e)[:160]
+        if "invalid_grant" in msg or "code" in msg.lower():
+            # Auth codes are single-use. Saying "rejected" makes people paste
+            # the same dead code again; this cost a real code once already.
+            print("  that code did not work. Google auth codes are single-use —")
+            print("  approve the consent screen again for a fresh code.")
+            print(f"  ({msg})")
+        else:
+            print(f"  code rejected: {msg}")
         return False
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(flow.credentials.to_json())
-    out.chmod(0o600)
-    print("  token stored (mode 600)")
+    if not info.get("refresh_token"):
+        print("  ! Google returned no refresh token. Revoke the app at")
+        print("    myaccount.google.com/permissions, approve again, and pick")
+        print("    the same account. (access_type=offline needs consent.)")
+    _write_google_token(out, info, client_id, client_secret, SCOPES)
+    print(f"  token stored (mode 600) at {out}")
     return True
+
+
+def _free_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
 
 
 def collect_credentials_json(creds_path: Path) -> bool:
@@ -764,6 +913,23 @@ def cmd_setup(args, cfg) -> int:
             state["provider"] = "missing-key"
 
     # --- google ---
+    if getattr(args, "print_auth_url", False):
+        # One string and out. Headless users otherwise run a whole wizard
+        # to obtain a URL, then write a script to produce it.
+        from .config import load as _load_url
+        creds_file = Path(_load_url().google.credentials_file)
+        if not creds_file.exists():
+            print(f"  no credentials file at {creds_file}")
+            print("  Finish the Google console steps first, or paste the JSON:")
+            print("    mail-agent setup --step google")
+            return 1
+        try:
+            print(_portable(creds_file))
+        except Exception as e:
+            print(f"  could not build the URL: {e}")
+            return 1
+        return 0
+
     if not only or only == "google":
         idx += 1
         _hdr(idx, "google (Gmail + Calendar)")
@@ -782,6 +948,7 @@ def cmd_setup(args, cfg) -> int:
             print("       (APIs & Services → Library → search → Enable)")
             print("    4. OAuth consent screen → External → fill name + email →")
             print("       add yourself as a test user")
+            print("       https://console.cloud.google.com/apis/credentials/consent")
             print("    5. Credentials → Create → OAuth client ID → Desktop app →")
             print("       Download JSON")
             if not non_interactive and _tty():

@@ -626,6 +626,8 @@ def main() -> int:
     p.add_argument("--import-env", action="store_true", help="copy known env vars into .secrets")
     p.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
     p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start|verify")
+    p.add_argument("--print-auth-url", action="store_true",
+                   help="print the Google consent URL and exit (headless boxes)")
     p.add_argument("--skip-voice", action="store_true")
     p.add_argument("--skip-service", action="store_true")
     def _fn_setup(a, c):

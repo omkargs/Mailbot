@@ -227,20 +227,122 @@ def test_resume_line_shows_prior_state(monkeypatch, tmp_path, capsys):
 
 
 def test_loopback_gives_up_on_time():
+    """The callback wait must be a guillotine, not a lifetime."""
     import time
     from mailbot import wizard as W
 
-    class HangingFlow:
-        def run_local_server(self, **kw):
-            time.sleep(30)
-
+    port = W._free_port()
     t0 = time.time()
     try:
-        W._run_loopback_once(HangingFlow(), port=18080, timeout=1)
+        W._loopback_code(port, timeout=1)
         assert False, "should have raised"
     except TimeoutError:
         pass
     assert time.time() - t0 < 10
+
+
+def test_loopback_captures_the_code():
+    import threading
+    import time
+    import urllib.request
+    from mailbot import wizard as W
+
+    port = W._free_port()
+    out = {}
+
+    def _go():
+        time.sleep(0.4)
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/?code=abc123&state=x", timeout=3).read()
+        except Exception:
+            pass
+        out["done"] = True
+
+    threading.Thread(target=_go, daemon=True).start()
+    assert W._loopback_code(port, timeout=8) == "abc123"
+
+
+def test_consent_url_has_a_live_redirect():
+    """The OOB flow was deleted by Google in 2022.
+
+    Regression: the old headless path asked for
+    redirect_uri=urn:ietf:wg:oauth:2.0:oob, so it could never complete -
+    and it failed late, after the user had done all the Google console
+    work. Also guard the SDK trap the reviewer hit: an InstalledAppFlow
+    with http://localhost emits a URL with no redirect_uri at all.
+    """
+    from urllib.parse import parse_qs, urlparse
+    from mailbot import wizard as W
+
+    url = W._consent_url("cid.apps.googleusercontent.com", ["a", "b"])
+    q = parse_qs(urlparse(url).query)
+    assert "oob" not in q["redirect_uri"][0]
+    assert q["redirect_uri"][0].startswith("http://localhost")
+    assert q["client_id"] == ["cid.apps.googleusercontent.com"]
+    assert q["response_type"] == ["code"]
+    assert q["access_type"] == ["offline"]      # else no refresh token
+    assert q["prompt"] == ["consent"]
+
+
+def test_paste_accepts_a_code_or_a_whole_url():
+    from mailbot import wizard as W
+
+    assert W._code_from_paste("4/abc") == "4/abc"
+    assert W._code_from_paste(
+        "http://localhost:8080/?state=s&code=4/abc&scope=x") == "4/abc"
+    assert W._code_from_paste("  4/xyz ") == "4/xyz"
+    assert W._code_from_paste("") == ""
+
+
+def test_google_client_reads_installed_and_web():
+    import json as _json
+    from mailbot import wizard as W
+
+    for kind in ("installed", "web"):
+        p = W.config_dir() / f"{kind}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps({kind: {"client_id": "cid-" + kind,
+                                        "client_secret": "sec-" + kind}}))
+        assert W._google_client(p) == ("cid-" + kind, "sec-" + kind)
+
+
+def test_token_file_matches_what_google_auth_reads(tmp_path):
+    """Credentials.from_authorized_user_file is picky about the shape."""
+    import json as _json
+    from google.oauth2.credentials import Credentials
+    from mailbot import wizard as W
+    from mailbot.providers.gmail import SCOPES
+
+    out = tmp_path / "tok.json"
+    W._write_google_token(out, {"refresh_token": "r1", "access_token": "a1"},
+                          "cid", "sec", SCOPES)
+    assert oct(out.stat().st_mode)[-3:] == "600"
+    creds = Credentials.from_authorized_user_file(str(out), SCOPES)
+    assert creds.refresh_token == "r1"
+    assert creds.token == "a1"
+
+
+def test_invalid_grant_does_not_look_like_a_generic_failure(monkeypatch, capsys):
+    """Auth codes are single-use. Say so, or people paste the dead one again."""
+    from mailbot import wizard as W
+
+    monkeypatch.setattr(W, "_exchange_code",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("invalid_grant: code expired")))
+    monkeypatch.setattr(W, "_loopback_code", lambda *a, **k: "")
+    monkeypatch.setattr(W, "_tty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "4/dead")
+
+    p = W.config_dir() / "c.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    p.write_text(_json.dumps({"installed": {"client_id": "c", "client_secret": "s"}}))
+
+    assert W.headless_google_auth(p) is False
+    out = capsys.readouterr().out
+    assert "single-use" in out
+    assert "approve the consent screen again" in out
 
 
 def test_key_help_points_at_each_provider():
