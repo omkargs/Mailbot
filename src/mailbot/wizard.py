@@ -296,6 +296,9 @@ def cmd_setup(args, cfg) -> int:
     skip_voice = bool(getattr(args, "skip_voice", False)) or fast
     skip_service = bool(getattr(args, "skip_service", False)) or fast
     state = _load_state()
+    if state and not only:
+        done = ", ".join(f"{k}={v}" for k, v in sorted(state.items()))
+        print(f"  Resuming — already done: {done}")
 
     # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
     # add-inbox is standalone: a full run never invents inboxes.

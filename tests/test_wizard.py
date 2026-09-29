@@ -197,3 +197,30 @@ def test_openrouter_models_ranked():
 
     ranked = D.rank(["zzz-model", "anthropic/claude-sonnet-4", "aaa-model"])
     assert ranked[0] == "anthropic/claude-sonnet-4"
+
+
+def test_resume_line_shows_prior_state(monkeypatch, tmp_path, capsys):
+    import json as _json
+    from mailbot import wizard as W
+    from mailbot import setup as S
+    from mailbot import config as C
+
+    monkeypatch.setattr(C, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(S, "config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(W, "config_dir", lambda: tmp_path / "cfg")
+    (tmp_path / "cfg").mkdir(parents=True)
+    (tmp_path / "cfg" / ".setup-state.json").write_text(
+        _json.dumps({"provider": "ok"}))
+
+    class Args:
+        step = ""
+        non_interactive = False
+        yes = False
+        fast = False
+        dry_run = True
+        import_env = False
+        skip_voice = False
+        skip_service = False
+
+    assert W.cmd_setup(Args(), C.load()) == 0
+    assert "Resuming" in capsys.readouterr().out

@@ -92,6 +92,30 @@ if ! PY="$(pick_python)"; then
 fi
 [ "$PY" = "uv" ] && say "${DIM}Using uv-managed Python (>=3.11, auto-fetched)${RST}" \
   || say "${DIM}Using $PY ($("$PY" --version 2>&1))${RST}"
+
+# Opensource splash: a 5-second hello, skippable with any key. Never shows
+# when output is piped, when stdin is not a TTY, in fast/CI runs, or when
+# MAIL_AGENT_NO_SPLASH is set — branding must never slow automation.
+splash() {
+  case " $* " in
+    *" --fast "*|*" --yes "*|*" --non-interactive "*|*" --import-env "*|*" --dry-run "*|*" --step "*|*" --help "*|*" -h "*)
+      return 0 ;;
+  esac
+  [ -t 0 ] || return 0
+  [ -n "${MAIL_AGENT_NO_SPLASH:-}" ] && return 0
+  cat <<LOGO
+  ${BOLD} __  __       _  _  _                _
+  |  \/  |  __ _ (_)| |  ___   ___  | |_
+  | |\/| | / _\` || || | / _ \\ / _ \\ | __|
+  | |  | || (_| || || || (_) || (_) || |_
+  |_|  |_| \\__,_||_||_| \\___/  \\___/  \\__|
+  ${RST}  the inbox colleague that acts — MIT licensed, yours to keep
+  ${DIM}showing off for 5s — press any key to skip${RST}
+LOGO
+  read -t 5 -n 1 -s -r _splash_key 2>/dev/null || true
+  printf '\n'
+}
+splash "$@"
 hdr()  { printf '\n%s▸ %s%s\n\n' "$BOLD" "$*" "$RST"; }
 
 # Secret input: visible=false, no default echo, no history.
@@ -186,10 +210,25 @@ if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
   if [ ! -d "$VENV" ]; then
     make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
   fi
-  say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
-  pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
+  # Re-runs are instant: a working venv is reused. Pass --reinstall to force.
+  _fresh=0
+  case " $* " in
+    *" --reinstall "*) _fresh=1 ;;
+  esac
+  if [ "$_fresh" -eq 1 ] || ! "$VENV/bin/python" -c "import mailbot" >/dev/null 2>&1; then
+    say "${DIM}Installing packages (a minute or two on first run — still working if quiet)…${RST}"
+    pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
+  else
+    say "${DIM}Reusing the existing install (pass --reinstall to force)…${RST}"
+  fi
   if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
-    exec "$VENV/bin/mail-agent" setup "$@"
+    # --reinstall is a setup.sh-only flag; the wizard must not see it.
+    _args=()
+    for _a in "$@"; do
+      [ "$_a" = "--reinstall" ] && continue
+      _args+=("$_a")
+    done
+    exec "$VENV/bin/mail-agent" setup "${_args[@]}"
   fi
   warn "new wizard unavailable, falling back to legacy prompts"
 fi
