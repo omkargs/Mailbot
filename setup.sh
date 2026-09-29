@@ -17,6 +17,77 @@ BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '%s✔ %s%s\n' "$GRN" "$*" "$RST"; }
 warn() { printf '%s! %s%s\n' "$YLW" "$*" "$RST"; }
+die()  { printf '%s✘ %s%s\n' "$RST" "$*" "$RST"; exit 1; }
+
+# Pick a Python >= 3.11, self-healing. Tries, in order:
+#   1. python3.13 / 3.12 / 3.11 / 3 on PATH
+#   2. uv (fetches its own Python automatically)
+#   3. apt install (root containers like fresh VPS images)
+# Dies with exact remediation steps only when everything failed.
+pick_python() {
+  local c v
+  for c in python3.13 python3.12 python3.11 python3; do
+    if command -v "$c" >/dev/null 2>&1; then
+      v="$("$c" -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null | tr -cd '0-9')"
+      if [ "${v:-0}" -ge 311 ] 2>/dev/null; then
+        printf '%s' "$c"
+        return 0
+      fi
+    fi
+  done
+  if command -v uv >/dev/null 2>&1; then
+    printf 'uv'
+    return 0
+  fi
+  if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+    say "${DIM}No Python 3.11+ found — installing python3.12 (needs root once)…${RST}"
+    apt-get update -qq 2>&1 | tail -n 1 || true
+    if apt-get install -y -qq python3.12 python3.12-venv 2>&1 | tail -n 2; then
+      if command -v python3.12 >/dev/null 2>&1; then
+        printf 'python3.12'
+        return 0
+      fi
+    fi
+    warn "apt install failed — continuing to error below"
+  fi
+  return 1
+}
+
+make_venv() {
+  # $1 = venv dir. Uses $PY (a binary) or 'uv' (fetches Python itself).
+  if [ "${PY:-}" = "uv" ]; then
+    uv venv --python '>=3.11' "$1"
+  else
+    "$PY" -m venv "$1" 2>/dev/null || {
+      warn "'$PY -m venv' failed — trying with pip bundled via ensurepip"
+      "$PY" -m ensurepip --upgrade 2>/dev/null || true
+      "$PY" -m venv "$1"
+    }
+  fi
+}
+
+pip_install() {
+  # $1 = venv dir, rest = pip args. Prefers uv, falls back to venv pip.
+  if command -v uv >/dev/null 2>&1; then
+    VIRTUAL_ENV="$1" uv pip install "${@:2}" -q 2>/dev/null && return 0
+  fi
+  "$1/bin/pip" install "${@:2}" -q
+}
+
+PY=""
+if ! PY="$(pick_python)"; then
+  die "No Python 3.11+ and none installable automatically.
+
+  Fix one of these, then re-run ./setup.sh:
+    1. Python 3.11+:  apt install python3.12 python3.12-venv   (Debian/Ubuntu)
+                       dnf install python3.12                  (Fedora)
+                       brew install python@3.12                (macOS)
+    2. Or install uv (it fetches Python itself):
+                       curl -LsSf astral.sh/uv/install.sh | sh
+  Current: $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'no python3 on PATH')"
+fi
+[ "$PY" = "uv" ] && say "${DIM}Using uv-managed Python (>=3.11, auto-fetched)${RST}" \
+  || say "${DIM}Using $PY ($("$PY" --version 2>&1))${RST}"
 hdr()  { printf '\n%s▸ %s%s\n\n' "$BOLD" "$*" "$RST"; }
 
 # Secret input: visible=false, no default echo, no history.
@@ -109,17 +180,9 @@ say "${DIM}$REPO${RST}"
 # legacy flow below only if the CLI is unavailable.
 if [ "${MAIL_AGENT_LEGACY_SETUP:-}" != "1" ]; then
   if [ ! -d "$VENV" ]; then
-    if command -v uv >/dev/null 2>&1; then
-      uv venv "$VENV"
-    else
-      python3 -m venv "$VENV"
-    fi
+    make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
   fi
-  if command -v uv >/dev/null 2>&1; then
-    VIRTUAL_ENV="$VENV" uv pip install -e "$REPO" -q 2>/dev/null || "$VENV/bin/pip" install -e "$REPO" -q
-  else
-    "$VENV/bin/pip" install -e "$REPO" -q
-  fi
+  pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
   if [ -x "$VENV/bin/mail-agent" ] && "$VENV/bin/mail-agent" setup --help >/dev/null 2>&1; then
     exec "$VENV/bin/mail-agent" setup "$@"
   fi
@@ -129,18 +192,10 @@ fi
 # ---------------------------------------------------------------- python (legacy)
 hdr "Python environment"
 if [ ! -d "$VENV" ]; then
-  if command -v uv >/dev/null 2>&1; then
-    uv venv "$VENV"
-  else
-    python3 -m venv "$VENV"
-  fi
+  make_venv "$VENV" || die "could not create the venv at $VENV (see errors above)"
 fi
 ok "venv at $VENV"
-if command -v uv >/dev/null 2>&1; then
-  VIRTUAL_ENV="$VENV" uv pip install -e "$REPO" -q
-else
-  "$VENV/bin/pip" install -e "$REPO" -q
-fi
+pip_install "$VENV" -e "$REPO" || die "could not install mailbot into $VENV (see errors above)"
 ok "package installed"
 
 mkdir -p "$CONFIG_DIR"
