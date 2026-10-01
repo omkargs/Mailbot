@@ -24,8 +24,11 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Conservative defaults. A user with real money can raise them in config.
-DEFAULT_MAX_CALLS_PER_MIN = 20
+# No client-side per-minute throttle. The provider enforces its own rate
+# limits (429), and those already back off properly in record_failure() —
+# a second, dumber limiter on top only invents failures the provider never
+# asked for. Set AGENT_MAX_CALLS_PER_MIN > 0 to re-enable a local ceiling.
+DEFAULT_MAX_CALLS_PER_MIN = 0
 DEFAULT_DAILY_TOKEN_CAP = 500_000
 DEFAULT_BACKOFF_BASE = 5.0
 DEFAULT_BACKOFF_MAX = 300.0
@@ -97,11 +100,12 @@ class Limits:
 
     # ------------------------------------------------------------------ calls
     def take(self) -> None:
-        """Account for one model call. Raises rather than exceeding the rate."""
+        """Account for one model call. Raises on an open circuit; the
+        per-minute rate check only applies when a local ceiling is set."""
         now = time.time()
         with self._lock:
             self._calls = [t for t in self._calls if now - t < 60.0]
-            if len(self._calls) >= self.max_calls_per_min:
+            if self.max_calls_per_min > 0 and len(self._calls) >= self.max_calls_per_min:
                 wait = 60.0 - (now - self._calls[0])
                 raise BudgetExhausted(
                     f"rate limit: {self.max_calls_per_min} calls/min reached, "

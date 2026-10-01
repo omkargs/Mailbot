@@ -232,7 +232,8 @@ class AgentConfig:
     # Hard ceilings on model spend. The token cap is checked once per run; a
     # single run can make a dozen model calls, so the per-minute cap and the
     # circuit breaker are what actually stop a runaway loop costing money.
-    max_calls_per_min: int = field(default_factory=lambda: int(_v("AGENT_MAX_CALLS_PER_MIN", "20")))
+    # 0 = no local per-minute ceiling (provider 429s still back off).
+    max_calls_per_min: int = field(default_factory=lambda: int(_v("AGENT_MAX_CALLS_PER_MIN", "0")))
     breaker_threshold: int = field(default_factory=lambda: int(_v("AGENT_BREAKER_THRESHOLD", "5")))
     warn_spend_pct: int = field(default_factory=lambda: int(_v("AGENT_WARN_SPEND_PCT", "80")))
     max_drafts_per_run: int = field(default_factory=lambda: int(_v("AGENT_MAX_DRAFTS", "40")))
