@@ -678,6 +678,17 @@ class ToolBox:
                 self.stats["sent"] += 1
                 db.log_action("send", self.p.account, recipients, detail=subject)
                 self._notify(self._tagged(self._sent_notice(to_addrs, subject, body, verdicts)))
+                # LEARN: every send is a labelled sample. The sent copy is the
+                # draft here, so this is a confirmation; corrections arrive
+                # when the user rewrites a draft instead (see harvest).
+                from .runner import record_send_confirmation
+                from ..brain import style as _voice
+
+                record_send_confirmation(self.p.account, to_addrs, subject, body,
+                                         in_reply_to)
+                tip = _voice.maybe_propose_voice(self.p.account)
+                if tip:
+                    self._notify(self._tagged(tip))
             return {"ok": ok, "mode": "auto"}
 
         # Otherwise queue for the user. The ping must show WHAT is being

@@ -40,6 +40,11 @@ def clean_db():
     from mailbot.agent import chatlog as _chatlog
 
     _chatlog._ensure()
+    # The voice log is a file, not a table — truncate it per test or LEARN
+    # samples leak across tests and every threshold test re-fires.
+    _vl = Path(_tmp) / "voice_log.jsonl"
+    if _vl.exists():
+        _vl.unlink()
     # Child tables first — drafts references runs, messages references accounts.
     for table in ("drafts", "approvals", "actions_log", "messages", "cursors",
                   "runs", "contacts", "skills", "labels", "usage_daily",

@@ -321,11 +321,12 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         return "\n".join(out)
 
     def voice() -> str:
-        from ..brain.style import voice_state
+        from ..brain.style import proposal_due, voice_state
 
         s = voice_state()
         if not s["total_samples"]:
-            return "No voice samples yet. It learns as you edit its drafts."
+            return "No voice samples yet. Every send teaches it — confirmations when "
+            "it sends as drafted, corrections when you rewrite a draft instead."
         acc = f"{s['accuracy']:.0%}" if s["accuracy"] is not None else "n/a"
         lines = [
             "*Voice learning*",
@@ -338,6 +339,13 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             lines.append("What you change most:")
             for f, n in s["most_corrected"][:4]:
                 lines.append(f"• {f} — {n}x")
+        due, why = proposal_due()
+        if due:
+            lines += ["", f"Profile review due ({why}) — run /brain to rebuild from these samples."]
+        else:
+            need = 12 - s["total_samples"]
+            if need > 0:
+                lines += ["", f"{need} more send{'s' if need != 1 else ''} until the next profile review."]
         return "\n".join(lines)
 
     def skill(name: str) -> str:

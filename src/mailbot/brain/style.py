@@ -436,6 +436,82 @@ def voice_state() -> dict[str, Any]:
     }
 
 
+# Proposal thresholds. Twelve sends is enough writing to characterise a
+# voice; two days of sending is enough time for the agent to have watched
+# one. Either fires — but only with something to show (3+ samples), and only
+# once per batch of twelve, so the operator is asked rarely and the asking
+# always carries new evidence.
+PROPOSAL_MIN_SAMPLES = 12
+PROPOSAL_MIN_DAYS = 2
+PROPOSAL_EARLY_MIN_SAMPLES = 3
+
+
+def _voice_log_age_days() -> float | None:
+    """Days since the first recorded sample. None when there is nothing."""
+    try:
+        rows = read_voice_log(limit=5000)
+    except FileNotFoundError:
+        return None
+    if not rows:
+        return None
+    try:
+        first = datetime.fromisoformat(str(rows[0].get("ts", "")).replace("Z", "+00:00"))
+        if first.tzinfo is None:
+            first = first.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - first).total_seconds() / 86400)
+    except (ValueError, TypeError):
+        return None
+
+
+def proposal_due() -> tuple[bool, str]:
+    """Is a voice-profile proposal owed, and why? Pure read, no side effects.
+
+    Returns (due, reason). The caller claims the batch BEFORE notifying, so
+    checking twice cannot double-propose — see maybe_propose_voice().
+    """
+    state = voice_state()
+    total = state["total_samples"]
+    if total >= PROPOSAL_MIN_SAMPLES:
+        return True, f"{total} sends recorded (every 12 earns a review)"
+    age = _voice_log_age_days()
+    if (age is not None and age >= PROPOSAL_MIN_DAYS
+            and total >= PROPOSAL_EARLY_MIN_SAMPLES):
+        return True, f"{total} sends over {age:.0f} days"
+    return False, ""
+
+
+def maybe_propose_voice(account: str) -> str | None:
+    """Proposal text when one is owed and unclaimed, else None.
+
+    One proposal per batch of twelve samples — the claim key includes the
+    batch, so batch N+1 proposes again with new evidence while batch N never
+    repeats. Time-based proposals (under 12 samples) live in batch 0 and
+    never block the count-based ones. Proposing never touches the profile
+    file; that happens only through /brain, by the operator's hand.
+    """
+    due, why = proposal_due()
+    if not due:
+        return None
+    from ..storage import db
+
+    state = voice_state()
+    batch = state["total_samples"] // PROPOSAL_MIN_SAMPLES
+    if not db.claim_surfaced(account, f"voice-{batch}", "voice_proposal", why):
+        return None
+    lines = [
+        "*Voice check-in* — I've watched you write, and I have notes.",
+        "",
+        f"Why now: {why}.",
+        "",
+        regenerate_learned_section(),
+        "",
+        "Nothing has changed — your voice file is untouched. To apply what "
+        "I've learned, run /brain and it rebuilds from these samples. "
+        "Ignore this and I'll check in again with the next batch.",
+    ]
+    return "\n".join(lines)
+
+
 def regenerate_learned_section() -> str:
     """Re-render the 'Learned corrections' block with current data."""
     state = voice_state()

@@ -837,6 +837,15 @@ def list_drafts(account: str | None = None, limit: int = 50) -> list[dict[str, A
         return [dict(r) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", params + [limit])]
 
 
+def mark_draft_harvested(id: str, account: str) -> None:
+    """A draft the LEARN loop has consumed. Harvested drafts leave the
+    'created' pool so the next scan does not diff them again — one draft,
+    one sample, ever."""
+    with db() as c:
+        c.execute("UPDATE drafts SET status='harvested' WHERE id=? AND account=?",
+                  (id, account))
+
+
 # ---------------------------------------------------------------- surfaced
 # "One card per message, ever." Every operator-facing message about a given
 # message is claimed here first. The claim is the dedupe, so a caller cannot

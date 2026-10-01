@@ -553,9 +553,24 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
     if res.get("status") == "ok":
         advance_cursor(provider, [m["id"] for m in new])
 
+    # LEARN runs once per scan, not once per send: diffing abandoned drafts
+    # against the user's own sent replies costs a thread fetch each, so it is
+    # bounded — and it must never break the scan that hosts it.
+    voice_tip = None
+    try:
+        harvest_voice_samples(provider.account, provider)
+        voice_tip = brain_style.maybe_propose_voice(provider.account)
+    except Exception as e:
+        log.debug("learn pass failed: %s", type(e).__name__)
+
     # Report the outcome. Sends already notified themselves; without this the
     # operator hears nothing at all when the agent escalated something, which
     # is exactly the moment they most need to know.
+    if voice_tip and notify:
+        from ..profiles import header_for as _header_for
+
+        _tag = _header_for(profile, provider.address if hasattr(provider, "address") else "")
+        notify(f"{_tag} {voice_tip}" if _tag else voice_tip)
     if notify and res.get("status") == "ok":
         from ..profiles import header_for
 
@@ -693,6 +708,13 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
                       detail=payload["subject"])
         if notify:
             notify(f"Sent: {payload['subject']}")
+        # LEARN, same as the auto path: this send is a confirmation sample,
+        # and twelve of them (or two days of them) earn a profile proposal.
+        record_send_confirmation(account, payload["to"], payload["subject"],
+                                 payload["body"], payload.get("in_reply_to", ""))
+        tip = brain_style.maybe_propose_voice(account)
+        if tip and notify:
+            notify(tip)
         # Approval learning: two approvals in a row earns a one-time
         # proposal — never silent auto-enable. Consent stays in chat.
         if notify:
@@ -727,28 +749,105 @@ def _hash_matches(kind: str, payload: dict[str, Any]) -> bool:
     return _guards.action_hash(_HASH_TOOL[kind], body) == stored
 
 
-def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 40) -> int:
-    """Compare agent drafts against what was actually sent, so the voice learns."""
-    drafts = db.list_drafts(account, limit=limit)
+def record_send_confirmation(account: str, to_addrs: list[str], subject: str,
+                               body: str, in_reply_to: str = "") -> None:
+    """Log what just went out as a voice sample. The sent copy IS the draft
+    here, so the row is a confirmation — proof the current voice works, not a
+    correction. Corrections arrive via harvest, below. Never raises: learning
+    must not break sending."""
+    try:
+        for addr in to_addrs:
+            brain_style.record_voice_sample(
+                account, in_reply_to or "", addr, subject,
+                body, body, context="sent as drafted",
+            )
+    except Exception as e:
+        log.debug("voice confirmation failed: %s", type(e).__name__)
+
+
+def _draft_age_days(created_at: str) -> float | None:
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+    except (ValueError, TypeError):
+        return None
+
+
+def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 10) -> int:
+    """Diff abandoned drafts against what the user actually sent instead.
+
+    When the operator ignores a draft and writes their own reply, the thread
+    holds a sent message newer than the draft, from their own address, with
+    different bytes. That pair — what the agent proposed vs what the human
+    chose — is the strongest learning signal there is, and it only exists
+    here. Each draft is consumed once (marked harvested); drafts older than
+    7 days with no sent reply are retired without a sample.
+
+    Bounded and exception-safe: this runs inside the scan cycle, and learning
+    must never break mail.
+    """
+    try:
+        drafts = [d for d in db.list_drafts(account, limit=limit) if d.get("in_reply_to")]
+    except Exception:
+        return 0
     if not drafts:
         return 0
+    own = (getattr(provider, "address", "") or "").lower()
     learned = 0
     for d in drafts:
-        if not d.get("in_reply_to"):
-            continue
         try:
-            actual = provider.get_message(d["in_reply_to"])
+            orig = provider.get_message(d["in_reply_to"])
+            thread_id = (orig or {}).get("thread_id", "")
+            thread = provider.get_thread(thread_id) if thread_id else []
         except Exception:
             continue
-        if not actual:
+        sent_by_user = None
+        for t in thread:
+            labels = [str(x).upper() for x in (t.get("label_ids") or [])]
+            sender = str(t.get("sender") or "")
+            if "SENT" not in labels and (not own or own not in sender.lower()):
+                continue
+            if _is_newer(t.get("date", ""), d.get("created_at", "")):
+                sent_by_user = t
+                break
+        if sent_by_user and sent_by_user.get("body") and d.get("body"):
+            import re as _re
+
+            norm_a = _re.sub(r"\s+", " ", d["body"]).strip()
+            norm_b = _re.sub(r"\s+", " ", sent_by_user["body"]).strip()
+            if norm_a != norm_b:
+                # Edited: the user rewrote it. Record the correction.
+                row = brain_style.record_voice_sample(
+                    account, thread_id, d.get("to_addr", ""), d.get("subject", ""),
+                    d["body"], sent_by_user["body"],
+                    context=f"draft rewritten in thread {thread_id}",
+                )
+                if row:
+                    learned += 1
+            # Identical (or empty): the send-time confirmation already covered
+            # it, or there is nothing to learn. Either way, consume the draft.
+            db.mark_draft_harvested(d["id"], account)
             continue
-        # If the user edited and sent our draft, the thread contains a later
-        # message. We compare the draft against the sent copy when we can find it.
-        if actual.get("body") and d.get("body"):
-            row = brain_style.record_voice_sample(
-                account, d["in_reply_to"], d["to_addr"], d["subject"],
-                d["body"], actual["body"], context=d.get("in_reply_to", ""),
-            )
-            if row:
-                learned += 1
+        age = _draft_age_days(d.get("created_at", ""))
+        if age is not None and age > 7:
+            db.mark_draft_harvested(d["id"], account)
     return learned
+
+
+def _is_newer(date_str: str, created_at: str) -> bool:
+    """Is this message newer than the draft? Unparseable dates abstain —
+    a wrong comparison here fabricates a correction out of nothing."""
+    try:
+        from datetime import datetime, timezone
+
+        def _parse(v: str):
+            dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        return _parse(date_str) > _parse(created_at)
+    except (ValueError, TypeError):
+        return False
