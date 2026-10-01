@@ -302,6 +302,16 @@ class Supervisor:
             if text:
                 self._say(f"*Scheduled — {job['kind']}*\n\n{text}")
 
+        # Follow-up watches ride the same cycle as jobs: quiet threads get
+        # their nudge drafted here, under the same send-or-queue gates.
+        try:
+            from .followups import run_due as _run_due
+
+            for text in _run_due(self.cfg, self.providers_factory(), notify=self.notify):
+                self._say(f"*Follow-up nudge*\n\n{text}")
+        except Exception as e:
+            log.warning("followup pass failed: %s: %s", type(e).__name__, e)
+
     # While push is healthy the interval scan stands down: IDLE wakes the
     # loop the second mail arrives, so re-reading the inbox every minute is
     # pure API spend for zero new information. The backstop stays — a scan

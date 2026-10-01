@@ -30,6 +30,7 @@ HELP = """\
 */show <id>* — read the full queued text before you decide
 */unsub <sender>* — stop hearing from them, show exit links
 */spam <id>* — report one message as spam
+*/followups* — threads still waiting on someone else
 */jev* — the fast decider: state, thresholds, last verdicts
 */security* — the nine send gates, in order
 */brain* — rebuild the voice profile
@@ -123,6 +124,9 @@ def handle_text(
 
     if cmd == "spam":
         return chat_ops["spam"](arg)
+
+    if cmd in ("followups", "waiting", "nudges"):
+        return chat_ops["followups"]()
 
     if cmd == "jev":
         return chat_ops["jev"](t)

@@ -146,6 +146,32 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         return "Sent." if res.get("sent") else "Discarded."
 
     # ---------------------------------------------------------------- unsub
+    # ------------------------------------------------------------ followups
+    def followups() -> str:
+        """Threads still waiting on someone else. The operator sees what
+        the agent is watching — a silent watcher is indistinguishable from
+        a broken one."""
+        from ..agent.followups import open_watches
+
+        provs = _providers()
+        if not provs:
+            return "No account connected."
+        lines = []
+        for _name, p in provs.items():
+            for w in open_watches(p.account):
+                import datetime as _dt
+
+                due_in = max(0, int((w["due_at"] - _dt.datetime.now(
+                    _dt.timezone.utc).timestamp()) // 86400))
+                lines.append(
+                    f"• {w['to_addr']} — {w['subject'][:60]} "
+                    f"(quiet, nudges in ~{due_in}d, "
+                    f"{w['nudge_count']}/2 used)")
+        if not lines:
+            return "Nobody owes you a reply. Enjoy it."
+        return "*Waiting on replies*\n\n" + "\n".join(lines)
+
+    # ---------------------------------------------------------------- unsub
     def unsub(target: str) -> str:
         """Leave a sender: archive everything from them, show the exits.
 
@@ -578,6 +604,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         "show": show,
         "unsub": unsub,
         "spam": spam,
+        "followups": followups,
         "jev": jev,
         "security": security,
         "brain": brain,

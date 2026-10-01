@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 
-def _payload(to="priya@studio.com"):
+def _payload(to="priya@studio.com", in_reply_to="m_learn"):
     from mailbot.agent import guards as _guards
 
     p = {"to": [to], "subject": "x",
          "body": "hello friend, confirming friday works fine",
-         "in_reply_to": "", "attachments": []}
+         "in_reply_to": in_reply_to, "attachments": []}
     p["action_hash"] = _guards.action_hash(
         "send_message", {k: v for k, v in p.items() if k != "action_hash"})
     return p
@@ -17,7 +17,7 @@ def _approve(provider, cfg, aid, to="priya@studio.com"):
     from mailbot.agent.runner import run_approval
     from mailbot.storage import db
 
-    db.create_approval(aid, "google", "send", _payload(to), reason="t")
+    db.create_approval(aid, "google", "send", _payload(to, aid), reason="t")
     notes = []
     res = run_approval("google", provider, cfg, aid, True, notify=notes.append)
     assert res["sent"] is True
@@ -44,7 +44,7 @@ def test_denial_breaks_the_streak(provider, cfg):
 
     _approve(provider, cfg, "ap_learn000021")
     db.create_approval("ap_learn000022", "google", "send",
-                       _payload("priya@studio.com"), reason="t")
+                       _payload("priya@studio.com", "ap_learn000022"), reason="t")
     run_approval("google", provider, cfg, "ap_learn000022", False)
     notes = _approve(provider, cfg, "ap_learn000023")
     assert not any("without asking" in n for n in notes)

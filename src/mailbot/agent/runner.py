@@ -631,6 +631,18 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
                  "Older mail is untouched — change AGENT_FIRST_RUN_DAYS to "
                  "look further back.", len(new), cfg.agent.first_run_days)
     log.info("%s: %d new messages", provider.account, len(new))
+    # Any arrival disarms follow-up watches on its thread — a reply means
+    # the ball is back in our court, not theirs. Runs before the agent pass
+    # so a nudge can never fire for a thread that just answered.
+    try:
+        from .followups import resolve as _resolve_watch
+
+        for m in new:
+            if m.get("thread_id"):
+                _resolve_watch(provider.account, m["thread_id"])
+    except Exception as e:
+        log.debug("followup resolve failed: %s", type(e).__name__)
+
     res = run_once(provider.account, provider, cfg, trigger="scan", notify=notify, messages=new,
                    model=model, profile=profile)
     # Advance only on a clean run so a crash does not swallow pending mail.
@@ -798,11 +810,26 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
                       detail="injection signals at execution time")
         return {"ok": False, "error": "blocked: injection signals at execution time"}
 
+    # Same ledger as the auto path: an approval executed twice (double-tap,
+    # chat racing an old card) sends once. The atomic approval claim usually
+    # wins first; this is the backstop when two different paths converge.
+    from . import guards as _guards
+
+    _in_reply = payload.get("in_reply_to") or ""
+    _send_key = _in_reply or f"fresh:{_guards.action_hash('send_message', payload)}"
+    if not db.claim_send(account, _send_key,
+                         _guards.action_hash("send_message", payload),
+                         ", ".join(payload["to"]), payload["subject"]):
+        return {"ok": True, "sent": False,
+                "error": "already sent for this message — duplicate suppressed"}
     ok = provider.send(DraftRequest(
         to=payload["to"], subject=payload["subject"],
         body=payload["body"], in_reply_to=payload.get("in_reply_to"),
         attachments=[Attachment(path=x) for x in payload.get("attachments", [])],
     ))
+    if not ok:
+        db.release_send_claim(account, _send_key)
+        return {"ok": ok, "sent": ok}
     if ok:
         db.log_action("send", account, ", ".join(payload["to"]), actor="user", approval_id=approval_id,
                       detail=payload["subject"])
@@ -815,6 +842,10 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
         tip = brain_style.maybe_propose_voice(account)
         if tip and notify:
             notify(tip)
+        from .followups import arm_for_send as _arm
+
+        _arm(account, provider, payload.get("in_reply_to", ""),
+             payload["to"], payload["subject"])
         # Approval learning: two approvals in a row earns a one-time
         # proposal — never silent auto-enable. Consent stays in chat.
         if notify:

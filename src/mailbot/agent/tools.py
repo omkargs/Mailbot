@@ -757,25 +757,52 @@ class ToolBox:
             verdicts.append((addr, verdict))
 
         if all(v.allowed for _, v in verdicts):
+            # The send ledger: one send per message, ever. Claimed BEFORE
+            # provider.send, so a concurrent twin (or a crash retry, or the
+            # operator saying "send it" twice) finds the claim and stops
+            # instead of sending a second, differently-worded reply.
+            send_key = in_reply_to or f"fresh:{guards.action_hash('send_message', {'to': to_addrs, 'subject': subject, 'body': body})}"
+            if not db.claim_send(self.p.account, send_key,
+                                 guards.action_hash("send_message",
+                                                    {"to": to_addrs, "subject": subject,
+                                                     "body": body}),
+                                 recipients, subject):
+                prior = db.sent_record(self.p.account, send_key)
+                detail = ""
+                if prior:
+                    import datetime as _dt
+
+                    when = _dt.datetime.fromtimestamp(
+                        float(prior["sent_at"]), _dt.timezone.utc).strftime("%H:%M")
+                    detail = f" (already sent at {when} to {prior['to_addrs']})"
+                return {"ok": True, "mode": "auto", "duplicate_suppressed": True,
+                        "reason": f"already sent for this message{detail} — not sending again"}
             ok = self.p.send(DraftRequest(to=to_addrs, subject=subject, body=body,
                                           in_reply_to=a.get("in_reply_to"),
                                           attachments=attachments))
-            if ok:
-                self.stats["sent"] += 1
-                db.log_action("send", self.p.account, recipients, detail=subject)
-                self._notify(self._tagged(self._sent_notice(to_addrs, subject, body, verdicts)))
-                # LEARN: every send is a labelled sample. The sent copy is the
-                # draft here, so this is a confirmation; corrections arrive
-                # when the user rewrites a draft instead (see harvest).
-                from .runner import record_send_confirmation
-                from ..brain import style as _voice
+            if not ok:
+                db.release_send_claim(self.p.account, send_key)
+                return {"ok": ok, "mode": "auto"}
+            self.stats["sent"] += 1
+            db.log_action("send", self.p.account, recipients, detail=subject)
+            self._notify(self._tagged(self._sent_notice(to_addrs, subject, body, verdicts)))
+            # LEARN: every send is a labelled sample. The sent copy is the
+            # draft here, so this is a confirmation; corrections arrive
+            # when the user rewrites a draft instead (see harvest).
+            from .runner import record_send_confirmation
+            from ..brain import style as _voice
 
-                record_send_confirmation(self.p.account, to_addrs, subject, body,
-                                         in_reply_to)
-                tip = _voice.maybe_propose_voice(self.p.account)
-                if tip:
-                    self._notify(self._tagged(tip))
-            return {"ok": ok, "mode": "auto"}
+            record_send_confirmation(self.p.account, to_addrs, subject, body,
+                                     in_reply_to)
+            tip = _voice.maybe_propose_voice(self.p.account)
+            if tip:
+                self._notify(self._tagged(tip))
+            # Follow-up watch: if they go quiet, the agent nudges. Arming
+            # never breaks sending — it fails silent inside.
+            from .followups import arm_for_send as _arm
+
+            _arm(self.p.account, self.p, in_reply_to, to_addrs, subject)
+            return {"ok": True, "mode": "auto"}
 
         # Otherwise queue for the user. The ping must show WHAT is being
         # approved: attachment filenames (never approve a file you cannot

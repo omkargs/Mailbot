@@ -235,6 +235,41 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_surfaced_msg ON surfaced(account, message_id)",
+    # ---------- sent ledger (one send per message, ever) ----------
+    # Approvals dedupe the queue; this dedupes the wire. Every send path —
+    # auto, chat-ordered, approved — claims here BEFORE provider.send, so a
+    # second attempt from any path finds the first send and stops.
+    """
+    CREATE TABLE IF NOT EXISTS sent_log (
+        account      TEXT NOT NULL,
+        msg_key      TEXT NOT NULL,               -- in_reply_to, or fresh:<hash>
+        payload_hash TEXT NOT NULL DEFAULT '',
+        to_addrs     TEXT NOT NULL DEFAULT '',
+        subject      TEXT NOT NULL DEFAULT '',
+        sent_at      REAL NOT NULL,               -- unix time
+        PRIMARY KEY (account, msg_key)
+    )
+    """,
+    # ---------- follow-up watches (never drop the ball) ----------
+    # Every send arms one: if the thread stays quiet past due_at, the agent
+    # drafts a nudge. A reply disarms it. Two nudges per thread lifetime,
+    # then silence — nagging the same person forever is harassment with
+    # extra steps.
+    """
+    CREATE TABLE IF NOT EXISTS followups (
+        account    TEXT NOT NULL,
+        thread_id  TEXT NOT NULL,
+        message_id TEXT NOT NULL DEFAULT '',
+        to_addr    TEXT NOT NULL DEFAULT '',
+        subject    TEXT NOT NULL DEFAULT '',
+        due_at     REAL NOT NULL,
+        nudge_count INTEGER NOT NULL DEFAULT 0,
+        status     TEXT NOT NULL DEFAULT 'pending',  -- pending|done
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (account, thread_id)
+    )
+    """,
 ]
 
 
@@ -893,6 +928,61 @@ def mark_draft_harvested(id: str, account: str) -> None:
 # message is claimed here first. The claim is the dedupe, so a caller cannot
 # forget to check: if the claim fails, the caller has already been told this
 # once and must stay quiet.
+
+def claim_send(account: str, msg_key: str, payload_hash: str,
+               to_addrs: str = "", subject: str = "") -> bool:
+    """Claim the right to send for this message, once. Returns True to the
+    winner, False to everyone else — forever for replies, 10 minutes for
+    fresh sends (an identical fresh send twice in a row is a stutter; a
+    week apart is intent).
+
+    The research is unanimous: duplicate sends are never fixed with prompt
+    instructions ("send once") or check-then-act code (TOCTOU race). The fix
+    is a durable ledger claimed atomically before bytes leave, so the second
+    attempt — same scan, other chat, crash retry — finds the first send and
+    stops. This is the approval claim extended to every send path.
+    """
+    import time as _time
+
+    fresh = msg_key.startswith("fresh:")
+    with db() as c:
+        if fresh:
+            row = c.execute(
+                "SELECT sent_at FROM sent_log WHERE account=? AND msg_key=?",
+                (account, msg_key)).fetchone()
+            if row:
+                try:
+                    age = _time.time() - float(row["sent_at"])
+                except (ValueError, TypeError):
+                    age = 0.0
+                if age < 600:
+                    return False
+                c.execute("DELETE FROM sent_log WHERE account=? AND msg_key=?",
+                          (account, msg_key))
+        cur = c.execute(
+            """INSERT INTO sent_log (account, msg_key, payload_hash, to_addrs, subject, sent_at)
+               VALUES (?,?,?,?,?,?) ON CONFLICT(account, msg_key) DO NOTHING""",
+            (account, msg_key, payload_hash, to_addrs, subject[:300],
+             _time.time()),
+        )
+        return cur.rowcount == 1
+
+
+def release_send_claim(account: str, msg_key: str) -> None:
+    """Drop a send claim. Only when the send itself failed — a failed send
+    must be retryable, a successful one never is."""
+    with db() as c:
+        c.execute("DELETE FROM sent_log WHERE account=? AND msg_key=?",
+                  (account, msg_key))
+
+
+def sent_record(account: str, msg_key: str) -> dict[str, Any] | None:
+    """Who already sent for this message, if anyone."""
+    with db() as c:
+        row = c.execute("SELECT * FROM sent_log WHERE account=? AND msg_key=?",
+                        (account, msg_key)).fetchone()
+    return dict(row) if row else None
+
 
 def claim_surfaced(account: str, message_id: str, kind: str = "ask",
                    detail: str = "") -> bool:

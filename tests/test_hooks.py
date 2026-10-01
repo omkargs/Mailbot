@@ -493,6 +493,82 @@ def test_pending_proposal_lifecycle(provider, cfg):
     assert pending_proposal("google") is None
 
 
+def test_second_send_for_same_message_suppressed(provider, cfg):
+    """The Msk bug: two differently-worded replies, one mail, two sends."""
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    cfg.agent.auto_send_contacts = ["msk@x.com"]
+    box = ToolBox(provider, cfg, run_id=1)
+    base = {"to": ["msk@x.com"], "subject": "Re: trip", "in_reply_to": "m1"}
+    first = box.run("send_message", {**base, "body": "hey msk, good to hear from you friend"})
+    second = box.run("send_message", {**base, "body": "hey msk, yeah stuff is happening friend"})
+    assert first.get("mode") == "auto"
+    assert second.get("duplicate_suppressed") is True
+    assert len(provider.sent) == 1
+    assert db.sent_record("google", "m1")["to_addrs"] == "msk@x.com"
+
+
+def test_chat_and_scan_cannot_double_send(provider, cfg):
+    """Two paths, one message: chat-ordered send + approved send converge."""
+    from mailbot.agent import guards as _guards
+    from mailbot.agent.runner import run_approval
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    cfg.agent.auto_send_contacts = ["msk@x.com"]
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
+    box.run("send_message", {"to": ["msk@x.com"], "subject": "Re: trip",
+                             "body": "hey msk, good to hear from you",
+                             "in_reply_to": "m9"})
+    p = {"to": ["msk@x.com"], "subject": "Re: trip",
+         "body": "hey msk, different words same mail here",
+         "in_reply_to": "m9", "attachments": []}
+    p["action_hash"] = _guards.action_hash(
+        "send_message", {k: v for k, v in p.items() if k != "action_hash"})
+    db.create_approval("ap_race_send", "google", "send", p, reason="t")
+    res = run_approval("google", provider, cfg, "ap_race_send", True)
+    assert res["sent"] is False and "duplicate" in res["error"]
+    assert len(provider.sent) == 1
+
+
+def test_failed_send_releases_claim(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    provider.auto_send = True
+    cfg.agent.auto_send_contacts = ["msk@x.com"]
+    box = ToolBox(provider, cfg, run_id=1)
+    args = {"to": ["msk@x.com"], "subject": "Re: trip",
+            "body": "hey msk, good to hear from you friend", "in_reply_to": "m2"}
+    real_send = provider.send
+    provider.send = lambda req: False
+    try:
+        assert box.run("send_message", args)["ok"] is False
+    finally:
+        provider.send = real_send
+    out = box.run("send_message", args)
+    assert out.get("mode") == "auto" and len(provider.sent) == 1
+
+
+def test_fresh_identical_stutter_collapses(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "msk@x.com", sent=True, received=True)
+    box = ToolBox(provider, cfg, run_id=1)
+    args = {"to": ["msk@x.com"], "subject": "hi",
+            "body": "hey msk, confirming friday works fine for us"}
+    assert box.run("send_message", args).get("mode") == "auto"
+    again = box.run("send_message", args)
+    assert again.get("duplicate_suppressed") is True
+    assert len(provider.sent) == 1
+
+
 def test_redteam_never_sends(provider, cfg):
     from mailbot.agent.tools import ToolBox
 

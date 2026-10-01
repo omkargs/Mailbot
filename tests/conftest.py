@@ -48,7 +48,8 @@ def clean_db():
     # Child tables first — drafts references runs, messages references accounts.
     for table in ("drafts", "approvals", "actions_log", "messages", "cursors",
                   "runs", "contacts", "skills", "labels", "usage_daily",
-                  "scheduled_jobs", "surfaced", "chat_history", "accounts"):
+                  "scheduled_jobs", "surfaced", "chat_history", "sent_log",
+                  "followups", "accounts"):
         with db.db() as c:
             c.execute(f"DELETE FROM {table}")
     # Spend limits are process-global so every thread shares one budget. Reset

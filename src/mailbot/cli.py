@@ -656,7 +656,8 @@ def cmd_reset(args, cfg):
 
     tables = ("drafts", "approvals", "actions_log", "messages", "cursors",
               "runs", "contacts", "labels", "usage_daily", "scheduled_jobs",
-              "chat_history", "skills", "surfaced", "accounts")
+              "chat_history", "skills", "surfaced", "sent_log", "followups",
+              "accounts")
     cleared = 0
     with db.db() as c:
         for t in tables:
