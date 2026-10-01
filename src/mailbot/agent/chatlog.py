@@ -29,13 +29,22 @@ CREATE TABLE IF NOT EXISTS chat_history (
 );
 """
 
-# A conversation is scoped to the inbox it happened in. With one account
-# there is nothing to scope and the key is "". With two, an unscoped log
-# means the agent answers "what did she say?" using the other mailbox's
-# history - which is both wrong and a privacy leak between profiles.
-_COLUMN = """
-ALTER TABLE chat_history ADD COLUMN account TEXT NOT NULL DEFAULT ''
-"""
+# A conversation is scoped to the inbox it happened in AND the chat it
+# happened on. With one account there is nothing to scope and the account
+# key is "". With two inboxes, an unscoped log means the agent answers "what
+# did she say?" using the other mailbox's history - which is both wrong and
+# a privacy leak between profiles. With two chats (Telegram + terminal),
+# an unscoped log means the terminal sees what you told Telegram — same
+# leak, smaller room. The key is always both.
+_COLUMNS = [
+    "ALTER TABLE chat_history ADD COLUMN account TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE chat_history ADD COLUMN chat TEXT NOT NULL DEFAULT 'owner'",
+]
+
+# Chat identities. Telegram's owner chat is the control channel; the terminal
+# REPL is a second one. Discord/Slack are notify-only and never write here.
+CHAT_OWNER = "owner"
+CHAT_TERMINAL = "terminal"
 
 
 def _current_account() -> str:
@@ -49,41 +58,46 @@ def _current_account() -> str:
         return ""
 
 
-def _key(account: str) -> str:
-    return account if account else _current_account()
+def _key(account: str, chat: str = CHAT_OWNER) -> tuple[str, str]:
+    return (account if account else _current_account(), chat or CHAT_OWNER)
 
 
 def _ensure() -> None:
     with db.db() as c:
         c.execute(SCHEMA)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(chat_history)")}
-        if "account" not in cols:
-            c.execute(_COLUMN)
+        for stmt in _COLUMNS:
+            col = stmt.split("ADD COLUMN")[1].split()[0]
+            if col not in cols:
+                c.execute(stmt)
 
 
-def record(role: str, content: str, account: str = "") -> None:
+def record(role: str, content: str, account: str = "", chat: str = CHAT_OWNER) -> None:
     """Append one turn. Never let a logging failure break a conversation."""
     if not content or not content.strip():
         return
     try:
         _ensure()
+        acct, ch = _key(account, chat)
         with db.db() as c:
             c.execute(
-                "INSERT INTO chat_history (ts, role, content, account) VALUES (?,?,?,?)",
-                (db.now(), role, content.strip()[:MAX_CHARS], _key(account)))
+                "INSERT INTO chat_history (ts, role, content, account, chat) VALUES (?,?,?,?,?)",
+                (db.now(), role, content.strip()[:MAX_CHARS], acct, ch))
     except Exception as e:
         log.warning("could not record chat history: %s", type(e).__name__)
 
 
-def recent(limit: int = MAX_TURNS, account: str = "") -> list[dict[str, str]]:
-    """The last few turns for THIS inbox, oldest first, ready for the API."""
+def recent(limit: int = MAX_TURNS, account: str = "",
+           chat: str = CHAT_OWNER) -> list[dict[str, str]]:
+    """The last few turns for THIS inbox on THIS chat, oldest first."""
     try:
         _ensure()
+        acct, ch = _key(account, chat)
         with db.db() as c:
             rows = c.execute(
-                "SELECT role, content FROM chat_history WHERE account=? "
+                "SELECT role, content FROM chat_history WHERE account=? AND chat=? "
                 "ORDER BY id DESC LIMIT ?",
-                (_key(account), limit),
+                (acct, ch, limit),
             ).fetchall()
     except Exception as e:
         log.warning("could not read chat history: %s", type(e).__name__)
@@ -91,15 +105,18 @@ def recent(limit: int = MAX_TURNS, account: str = "") -> list[dict[str, str]]:
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
-def clear(account: str = "") -> int:
+def clear(account: str = "", chat: str = CHAT_OWNER) -> int:
     """Forget the conversation. Used by /reset and after a topic change.
 
-    Scoped to one inbox: forgetting the Work thread must not wipe Personal.
+    Scoped to one inbox on one chat: forgetting the Work thread must not wipe
+    Personal, and clearing the terminal must not wipe Telegram.
     """
     try:
         _ensure()
+        acct, ch = _key(account, chat)
         with db.db() as c:
-            cur = c.execute("DELETE FROM chat_history WHERE account=?", (_key(account),))
+            cur = c.execute("DELETE FROM chat_history WHERE account=? AND chat=?",
+                            (acct, ch))
         return cur.rowcount
     except Exception as e:
         log.warning("could not clear chat history: %s", type(e).__name__)

@@ -647,6 +647,40 @@ def cmd_jev(args, cfg):
     return 0
 
 
+def cmd_chat(args, cfg):
+    """Talk to the agent from the terminal. Same handler as Telegram.
+
+    Not a second interface with its own rules — every line goes through
+    handle_text with chat="terminal", so every command works identically and
+    conversation memory is separate from the Telegram thread. Standing
+    authority changes are allowed here: the owner is in the room, typing.
+    """
+    from .agent.chat import handle_text
+    from .agent.chatops import build_chat_ops
+    from .notify.channels import build_notifiers
+
+    providers = _providers(cfg)
+    if not providers:
+        print("No authenticated accounts.")
+        return 1
+    notifier = build_notifiers(cfg)
+    ops = build_chat_ops(cfg, lambda: providers, notify=notifier.send)
+    print("Talking to mail-agent. Same commands as Telegram (/help). Ctrl-D to quit.")
+    while True:
+        try:
+            line = input("you> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        try:
+            reply = handle_text(line, cfg, providers, ops, chat="terminal")
+        except Exception as e:
+            reply = f"Something went wrong: {type(e).__name__}. Check the logs."
+        if reply:
+            print(reply)
+    return 0
+
+
 def cmd_cal(args, cfg):
     """Read the calendar from the terminal."""
     providers = _providers(cfg)
@@ -776,6 +810,9 @@ def main() -> int:
     p = sub.add_parser("reset", help="wipe local agent state (keeps credentials + voice profile)")
     p.add_argument("--yes", action="store_true", help="confirm the wipe")
     p.set_defaults(fn=cmd_reset)
+
+    p = sub.add_parser("chat", help="talk to the agent (same handler as Telegram)")
+    p.set_defaults(fn=cmd_chat)
 
     p = sub.add_parser("cal", help="show upcoming calendar events")
     p.add_argument("--limit", type=int, default=10)

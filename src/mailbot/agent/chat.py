@@ -47,8 +47,14 @@ def handle_text(
     cfg,
     providers: dict[str, Any],
     chat_ops: dict[str, Any],
+    chat: str = "owner",
 ) -> str | None:
-    """Route one inbound chat message. Returns the reply text, or None to stay silent."""
+    """Route one inbound chat message. Returns the reply text, or None to stay silent.
+
+    `chat` is which conversation this is (Telegram owner chat, terminal,
+    ...). Telegram and the terminal run this same function with different
+    chat keys, so both share every command and both remember separately.
+    """
     t = (text or "").strip()
     if not t:
         return None
@@ -58,10 +64,10 @@ def handle_text(
         # with the same tools the triage loop uses, under the same send gate.
         from .chatlog import record
 
-        record("user", t)
-        reply = chat_ops["ask"](t)
+        record("user", t, chat=chat)
+        reply = chat_ops["ask"](t, chat)
         if reply:
-            record("agent", reply)
+            record("agent", reply, chat=chat)
         return reply
 
     try:
@@ -129,7 +135,7 @@ def handle_text(
         return chat_ops["skill"](arg)
 
     if cmd in ("reset", "forget", "clear"):
-        return chat_ops["reset"]()
+        return chat_ops["reset"](chat)
 
     if cmd == "profiles":
         from .. import profiles as _profiles

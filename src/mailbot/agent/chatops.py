@@ -348,7 +348,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         return f"Skill *{s['name']}* loaded: {s['description'] or s['instructions'][:100]}"
 
     # ------------------------------------------------------------------- ask
-    def ask(question: str) -> str:
+    def ask(question: str, chat: str = "owner") -> str:
         """Answer a plain-language question against the real mailbox.
 
         This is the path that makes the agent a teammate rather than a menu.
@@ -356,8 +356,9 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         unchanged: the model can read freely, but anything that sends or
         deletes is still gated by the user's own rules.
 
-        Carries the last few turns so follow-ups resolve. "Reply to him" only
-        works if the agent still knows who "him" is.
+        Carries this chat's last few turns so follow-ups resolve. "Reply to
+        him" only works if the agent still knows who "him" is — and "him" on
+        Telegram is not "him" on the terminal, so history is per-chat.
         """
         from .ask import answer
         from .chatlog import recent
@@ -366,7 +367,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         if not provs:
             return "No mailbox is connected. Run mail-agent auth."
         p = next(iter(provs.values()))
-        return answer(question, cfg, p, history=recent(), notify=notify)
+        return answer(question, cfg, p, history=recent(chat=chat), notify=notify)
 
     # -------------------------------------------------------------- schedule
     def schedule(text: str) -> str:
@@ -426,12 +427,12 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         ok = db.cancel_job(job_id)
         return f"Cancelled `{job_id}`." if ok else f"No enabled job with id `{job_id}`."
 
-    def reset() -> str:
+    def reset(chat: str = "owner") -> str:
         """Drop the conversation. Use this when changing topics, so an old
         'him' or 'that one' cannot bleed into a new question."""
         from .chatlog import clear
 
-        n = clear()
+        n = clear(chat=chat)
         return f"Forgot {n} earlier message{'s' if n != 1 else ''}. Fresh start."
 
     return {

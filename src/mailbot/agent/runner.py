@@ -279,6 +279,12 @@ def run_once(
             log.warning("agent hit MAX_ITERATIONS (%d); messages left unprocessed", MAX_ITERATIONS)
             final_text = "stopped: iteration limit reached, mail left for the next run"
 
+        # The closing summary is model-written, so it passes through the same
+        # identity wash as chat replies. A summary that introduces itself as
+        # the router's model undoes the whole "your agent" framing.
+        from .ask import sanitize_identity
+
+        final_text = sanitize_identity(final_text)
         if completed:
             for m in pending:
                 db.mark_processed(m["id"], account)

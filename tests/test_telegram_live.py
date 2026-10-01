@@ -75,7 +75,8 @@ def test_it_chats_back(tg):
         "chat": {"id": 12345}, "text": "what needs me?"}}])
     n = TelegramNotifier("tok", "12345", long_poll=False)
     out = n.poll_once()
-    assert out == [{"action": "chat", "text": "what needs me?", "update_id": 1}]
+    assert out == [{"action": "chat", "text": "what needs me?", "update_id": 1,
+                      "chat": "telegram:12345"}]
 
 
 def test_approve_and_discard_are_understood(tg):
