@@ -51,11 +51,19 @@ def test_approval_cannot_be_resolved_twice():
     assert again["status"] == "approved", "a stale approval must not be re-resolvable"
 
 
+def _hashed_send_payload(**kw):
+    from mailbot.agent import guards as _guards
+
+    p = {"to": ["a@b.com"], "subject": "S", "body": "B"}
+    p.update(kw)
+    p["action_hash"] = _guards.action_hash("send_message", {k: v for k, v in p.items() if k != "action_hash"})
+    return p
+
+
 def test_run_approval_denies_without_sending(provider, cfg):
     from mailbot.agent.runner import run_approval
 
-    db.create_approval("ap3", "google", "send",
-                       {"to": ["a@b.com"], "subject": "S", "body": "B"}, reason="r")
+    db.create_approval("ap3", "google", "send", _hashed_send_payload(), reason="r")
     res = run_approval("google", provider, cfg, "ap3", approved=False)
     assert res["ok"] and not res["sent"]
     assert provider.sent == []
@@ -64,8 +72,7 @@ def test_run_approval_denies_without_sending(provider, cfg):
 def test_run_approval_sends_when_approved(provider, cfg):
     from mailbot.agent.runner import run_approval
 
-    db.create_approval("ap4", "google", "send",
-                       {"to": ["a@b.com"], "subject": "S", "body": "B"}, reason="r")
+    db.create_approval("ap4", "google", "send", _hashed_send_payload(), reason="r")
     res = run_approval("google", provider, cfg, "ap4", approved=True)
     assert res["ok"] and res["sent"]
     assert len(provider.sent) == 1

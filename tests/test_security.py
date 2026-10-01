@@ -371,10 +371,14 @@ def test_concurrent_approves_send_once(provider, cfg):
     from mailbot.agent.runner import run_approval
     from mailbot.storage import db
 
-    db.create_approval("ap_race000001", "google", "send",
-                       {"to": ["a@b.com"], "subject": "x",
-                        "body": "hello friend, confirming friday works fine",
-                        "in_reply_to": "", "attachments": []},
+    from mailbot.agent import guards as _guards
+
+    _race_payload = {"to": ["a@b.com"], "subject": "x",
+                     "body": "hello friend, confirming friday works fine",
+                     "in_reply_to": "", "attachments": []}
+    _race_payload["action_hash"] = _guards.action_hash(
+        "send_message", {k: v for k, v in _race_payload.items() if k != "action_hash"})
+    db.create_approval("ap_race000001", "google", "send", _race_payload,
                        reason="race test")
     results = []
     ts = [threading.Thread(target=lambda: results.append(

@@ -580,6 +580,22 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
     db.resolve_approval(approval_id, "approved" if approved else "denied", by="user")
     kind = row["kind"]
 
+    # The approval is bound to the exact bytes queued. Anything that drifted
+    # between the card and this call — a mutated recipient, a swapped body —
+    # is something the user never approved, so it does not run. Approvals
+    # queued before hash binding carry no hash and are held for the same
+    # reason: unknown provenance is not provenance.
+    if approved and kind in ("send", "calendar_delete", "calendar_invite"):
+        if not _hash_matches(kind, payload):
+            db.resolve_approval(approval_id, "blocked", by="gate")
+            db.log_action("send_blocked", account, approval_id,
+                          actor="gate", approval_id=approval_id,
+                          detail="approval hash mismatch or missing — drift voids it")
+            if notify:
+                notify("Held: that approval no longer matches what was queued. "
+                       "Re-queue it from the current draft.")
+            return {"ok": False, "error": "blocked: approval drifted from what was queued"}
+
     if not approved:
         db.log_action("send_denied", account, payload.get("event_id") or ", ".join(payload.get("to", [])),
                       actor="user", approval_id=approval_id)
@@ -660,6 +676,24 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
                     notify(tip)
                     break
     return {"ok": ok, "sent": ok}
+
+
+_HASH_TOOL = {
+    "send": "send_message",
+    "calendar_delete": "calendar_delete",
+    "calendar_invite": "calendar_invite",
+}
+
+
+def _hash_matches(kind: str, payload: dict[str, Any]) -> bool:
+    """Does this payload still match the hash it was queued with?"""
+    from . import guards as _guards
+
+    stored = payload.get("action_hash", "")
+    if not stored:
+        return False
+    body = {k: v for k, v in payload.items() if k != "action_hash"}
+    return _guards.action_hash(_HASH_TOOL[kind], body) == stored
 
 
 def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 40) -> int:

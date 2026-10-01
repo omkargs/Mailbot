@@ -272,3 +272,20 @@ def can_calendar_write(action: str, cfg_calendar_enabled: bool) -> bool:
     if not cfg_calendar_enabled:
         return False
     return action == "create"
+
+
+def action_hash(tool: str, args: dict[str, Any]) -> str:
+    """Bind an approval to the exact action it approved.
+
+    The hash is stored with the queued approval and recomputed at execution.
+    Any drift between "what the user approved" and "what is about to run" —
+    a mutated recipient, a swapped body — voids the approval instead of
+    sending something the user never saw. This is the TOCTOU fix at the
+    content level: the atomic claim stops double-execution, the hash stops
+    substituted execution.
+    """
+    import hashlib
+    import json
+
+    canonical = json.dumps({"tool": tool, "args": args}, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
