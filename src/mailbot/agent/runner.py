@@ -22,6 +22,7 @@ from ..config import Config
 from ..providers.base import Attachment, MailProvider
 from ..storage import db
 from . import guards
+from . import jev
 from . import triage
 from .client import build_client, guarded_call, handle_refusal, usage_to_dict
 from .tools import TOOLS, ToolBox, build_system_prompt
@@ -107,10 +108,23 @@ def run_once(
             db.finish_run(run_id, status="ok")
             return {"status": "empty", "run_id": run_id}
 
-        # Cheap triage pass first: a small model sorts, IGNOREs get archived
-        # here, and the flagship only ever sees what matters. Any failure falls
-        # back to the full flagship pass — mail is never dropped to save money.
-        if triage.wanted(cfg):
+        # Two brains. Jev is the cheap one: System-One sorts each message in
+        # milliseconds for cents, and the flagship only ever sees what deserves
+        # a real reply. If Jev is unconfigured or errors, the small triage model
+        # is the fallback; if that fails too, the full flagship pass runs. Mail
+        # is never dropped to save money.
+        if jev.enabled(cfg):
+            try:
+                verdicts = {m["id"]: jev.decide(m, cfg) for m in pending[:12]}
+                for v in verdicts.values():
+                    db.log_action("jev", account, v.verdict,
+                                  detail=f"conf={v.confidence:.2f} {v.reason}",
+                                  actor="system")
+                pending, _archived = jev.prune(pending, verdicts, cfg, provider, box)
+            except Exception as e:
+                log.warning("jev pass failed (%s); falling back", type(e).__name__)
+                pending = [m for m in pending if "_jev" not in m]
+        elif triage.wanted(cfg):
             try:
                 verdicts = triage.classify(pending[:12], cfg)
                 pending, _archived = triage.prune(pending, verdicts, cfg, provider, box)
@@ -122,6 +136,22 @@ def run_once(
             n = box.stats["triaged"]
             return {"status": "ok", "run_id": run_id,
                     "summary": f"Filed {n} newsletter(s) — nothing needs you.",
+                    "stats": box.stats,
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_read": 0, "cache_write": 0}}
+
+        # Jev said ASK: a human is needed. Escalate here rather than paying the
+        # flagship to read a message the cheap decider already ruled out of
+        # scope. This is the whole point of the two-brain split, and it is safe
+        # only because ASK is the fail-closed direction — a Jev failure lands
+        # here too, so the worst case is a held message, never a lost one.
+        pending, held = _hold_jev_asks(pending, box, account)
+        if not pending:
+            db.finish_run(run_id, triaged=box.stats["triaged"],
+                          escalated=box.stats["escalated"],
+                          input_tokens=0, output_tokens=0, status="ok")
+            return {"status": "ok", "run_id": run_id,
+                    "summary": f"{box.stats['escalated']} thing(s) need you.",
                     "stats": box.stats,
                     "usage": {"input_tokens": 0, "output_tokens": 0,
                               "cache_read": 0, "cache_write": 0}}
@@ -144,6 +174,24 @@ def run_once(
                 f"subject: {m.get('subject', '')[:120]}", "headers"))
             if "_triage" in m:
                 ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
+            v = m.get("_jev")
+            if v is not None:
+                # Jev's extra signals are context, not instructions. The
+                # flagship still decides the reply; this tells it how much care
+                # the reply deserves and who it is going to.
+                bits = [f"jev={v.verdict} ({v.confidence:.2f})"]
+                if v.importance != "normal":
+                    bits.append(f"importance={v.importance}")
+                if v.deadline:
+                    bits.append(f"deadline={v.deadline:.0f}/3")
+                if v.needs_reply:
+                    bits.append("they are waiting on a reply")
+                if v.draft_tier:
+                    bits.append(f"draft with {v.draft_tier} care")
+                ctx.append("; ".join(bits))
+                reg = brain_style.register_for(m.get("sender", ""))
+                if reg:
+                    ctx.append(f"register with this person: {reg}")
             if body:
                 ctx.append(guards.fence(body[:1500], "body"))
             else:
@@ -265,6 +313,49 @@ def run_once(
                               error="run aborted before completion")
         except Exception:
             pass
+
+
+def _card_flags(m: dict[str, Any]) -> str:
+    """Jev's VIP / urgent annotations, for the top of an operator card."""
+    v = m.get("_jev")
+    flags = getattr(v, "flags", None) or []
+    return f" [{' · '.join(flags)}]" if flags else ""
+
+
+def _hold_jev_asks(
+    pending: list[dict[str, Any]],
+    box,
+    account: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Escalate everything Jev marked ASK. Returns (rest, held_count).
+
+    One card per message, ever. The dedupe claim is taken BEFORE the notify,
+    and released if the notify itself failed, so a channel outage does not
+    permanently silence a message the user never saw.
+    """
+    rest: list[dict[str, Any]] = []
+    held = 0
+    for m in pending:
+        v = m.get("_jev")
+        if v is None or v.verdict != jev.ASK:
+            rest.append(m)
+            continue
+        question = (
+            f"{m.get('sender', '')} — {m.get('subject', '') or '(no subject)'}"
+            f"{_card_flags(m)}: {v.reason}"
+        )
+        if not db.claim_surfaced(account, m["id"], "ask", v.reason):
+            # Already asked. The user knows; asking again is the noise this
+            # whole mechanism exists to remove.
+            rest.append(m)
+            continue
+        mid = box._notify(box._tagged(f"Needs you: {question}"))
+        if mid is None and box.notify:
+            db.release_surfaced(account, m["id"], "ask")
+        else:
+            box.stats["escalated"] += 1
+            held += 1
+    return rest, held
 
 
 def fetch_new(provider: MailProvider, limit: int = 0, cfg: Config | None = None) -> list[dict[str, Any]]:

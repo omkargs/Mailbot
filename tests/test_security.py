@@ -147,6 +147,8 @@ def _full_cfg(**kw):
     c.agent.send_mode = "auto"
     c.agent.auto_send_contacts = ["boss@corp.com"]
     c.agent.daily_token_cap = 10_000_000
+    # Flagship-path tests: the decider stays off here (see conftest.cfg).
+    c.jev.enabled = False
     for k, v in kw.items():
         setattr(c.agent, k, v)
     return c

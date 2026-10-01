@@ -79,7 +79,7 @@ def _unquote_shell(v: str) -> str:
 def _secrets() -> dict[str, str]:
     """Environment wins over the secrets file."""
     file_vals = _read_secrets_file()
-    return {**file_vals, **{k: v for k, v in os.environ.items() if k.startswith(("MAIL_", "DISCORD_", "TELEGRAM_", "SLACK_", "ROUTER_"))}}
+    return {**file_vals, **{k: v for k, v in os.environ.items() if k.startswith(("MAIL_", "DISCORD_", "TELEGRAM_", "SLACK_", "ROUTER_", "JEV_"))}}
 
 
 def cfg() -> dict[str, Any]:
@@ -111,6 +111,46 @@ class RouterConfig:
     def model_id(self) -> str:
         """Alias so callers can use either name."""
         return self.model
+
+
+@dataclass
+class JevConfig:
+    """Jev System-One: the fast decider that sorts mail before the flagship.
+
+    The flagship model is slow and costs real money per call, so it used to
+    read every newsletter. Jev does the sorting in milliseconds for cents and
+    the flagship only ever sees what deserves a real reply.
+
+    Endpoint, key and model are separable from the main provider on purpose:
+    a local Ollama user still wants Jev, and a hosted flagship can share one
+    router. Each falls back to the main provider's value when unset.
+    """
+
+    enabled: bool = field(default_factory=lambda: _v("JEV_ENABLED", "1") != "0")
+    base_url: str = field(default_factory=lambda: _v("JEV_BASE_URL", ""))
+    api_key: str = field(default_factory=lambda: _v("JEV_API_KEY", ""))
+    model: str = field(default_factory=lambda: _v("JEV_MODEL", "jev"))
+    # A verdict below this confidence is not trusted: the mail falls through
+    # to the flagship rather than being filed on a guess.
+    min_confidence: float = field(default_factory=lambda: float(_v("JEV_MIN_CONFIDENCE", "0.6")))
+    # A strong "needs the human" signal overrides a FILE verdict. Filing is
+    # reversible, so the bar is higher than for sending — but a message that
+    # genuinely needs a human is never filed on a confidence score alone.
+    file_needs_cut: float = field(default_factory=lambda: float(_v("JEV_FILE_NEEDS_CUT", "0.7")))
+    needs_cut: float = field(default_factory=lambda: float(_v("JEV_NEEDS_CUT", "0.5")))
+    timeout: int = field(default_factory=lambda: int(_v("JEV_TIMEOUT", "20")))
+
+    def endpoint(self, router: "RouterConfig") -> tuple[str, str, str]:
+        """(url, key, model) with the main provider as the fallback."""
+        return (
+            (self.base_url or router.base_url or "").rstrip("/"),
+            self.api_key or router.api_key or "",
+            self.model or "jev",
+        )
+
+    def configured(self, router: "RouterConfig") -> bool:
+        url, key, _ = self.endpoint(router)
+        return bool(self.enabled and url and key)
 
 
 @dataclass
@@ -202,6 +242,7 @@ class AgentConfig:
 @dataclass
 class Config:
     router: RouterConfig = field(default_factory=RouterConfig)
+    jev: JevConfig = field(default_factory=JevConfig)
     google: GoogleConfig = field(default_factory=GoogleConfig)
     microsoft: MicrosoftConfig = field(default_factory=MicrosoftConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)

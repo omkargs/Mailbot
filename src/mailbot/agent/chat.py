@@ -25,7 +25,10 @@ HELP = """\
 */scan* — process new mail now
 */drafts* — drafts waiting for you
 */approve <id>* — send a queued reply
+*/approve all* — send everything queued (each still re-validated)
 */discard <id>* — drop a queued reply
+*/jev* — the fast decider: state, thresholds, last verdicts
+*/security* — the nine send gates, in order
 */brain* — rebuild the voice profile
 */voice* — how well it has learned your writing
 */schedule <what and when>* — e.g. "brief at 5", "inbox at 7 every morning"
@@ -90,9 +93,18 @@ def handle_text(
         return chat_ops["drafts"]()
 
     if cmd in ("approve", "discard", "deny"):
+        if cmd == "approve" and arg.lower() == "all":
+            return chat_ops["approve_all"]()
         if not arg:
-            return f"Usage: /{cmd} <id> — run /drafts to see the waiting ids."
+            return (f"Usage: /{cmd} <id> — or /approve all — "
+                    f"run /drafts to see the waiting ids.")
         return chat_ops["approve"](arg, cmd in ("approve",))
+
+    if cmd == "jev":
+        return chat_ops["jev"](t)
+
+    if cmd == "security":
+        return chat_ops["security"]()
 
     if cmd == "brain":
         return chat_ops["brain"]()

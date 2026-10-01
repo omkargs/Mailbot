@@ -373,6 +373,32 @@ def _formality(t: str) -> str:
     return "formal" if score > 0 else "casual"
 
 
+def register_for(sender: str) -> str:
+    """Which version of the user to be when writing to this person.
+
+    One voice for everyone is the failure mode. "Hi Bob, I hope this email
+    finds you well" to someone who has called you bro for twenty years is the
+    single worst thing an agent can send, and no amount of style-profile
+    accuracy fixes it — the profile is an average, and this is the exception.
+
+    Deliberately coarse and deterministic. It reads the address, not a model
+    guess, because the one thing that must not happen is the agent picking a
+    wrong register on a first contact.
+    """
+    s = (sender or "").lower()
+    if not s:
+        return ""
+    if any(k in s for k in ("unsubscribe", "noreply", "no-reply", "donotreply",
+                            "newsletter", "promo", "marketing", "notifications@")):
+        return "shield — do not write to a bulk or no-reply sender at all"
+    domain = s.rpartition("@")[2]
+    if not domain or domain in ("gmail.com", "yahoo.com", "yahoo.co.uk", "outlook.com",
+                                "hotmail.com", "icloud.com", "proton.me", "protonmail.com",
+                                "aol.com", "live.com", "msn.com", "gmx.com", "mail.com"):
+        return "personal — the way they actually text a friend: warm, loose, no stiff greeting"
+    return "professional — proper greeting, clear and direct, no slang"
+
+
 def read_voice_log(limit: int = 500) -> list[dict[str, Any]]:
     p = _voice_log_path()
     if not p.exists():

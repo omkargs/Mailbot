@@ -619,7 +619,7 @@ def cmd_reset(args, cfg):
 
     tables = ("drafts", "approvals", "actions_log", "messages", "cursors",
               "runs", "contacts", "labels", "usage_daily", "scheduled_jobs",
-              "chat_history", "skills", "accounts")
+              "chat_history", "skills", "surfaced", "accounts")
     cleared = 0
     with db.db() as c:
         for t in tables:
@@ -629,6 +629,21 @@ def cmd_reset(args, cfg):
             except Exception as e:
                 print(f"  skipped {t}: {type(e).__name__}")
     print(f"cleared {cleared} tables — fresh start")
+    return 0
+
+
+def cmd_jev(args, cfg):
+    """Show the Jev decider's live config, thresholds and recent verdicts."""
+    from .agent import jev as jev_mod
+    from .agent.chatops import build_chat_ops
+
+    ops = build_chat_ops(cfg, lambda: {}, notify=None)
+    extra = ""
+    if getattr(args, "set", ""):
+        extra = f"/jev {args.set}"
+    print(ops["jev"](extra))
+    if not jev_mod.enabled(cfg):
+        return 0
     return 0
 
 
@@ -765,6 +780,11 @@ def main() -> int:
     p = sub.add_parser("cal", help="show upcoming calendar events")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(fn=cmd_cal)
+
+    p = sub.add_parser("jev", help="the fast decider: config, thresholds, verdicts")
+    p.add_argument("set", nargs="?", default="",
+                   help="optional tuning hint, e.g. 'conf 0.7'")
+    p.set_defaults(fn=cmd_jev)
 
     p = sub.add_parser("setup", help="guided setup: provider, google, chat (headless-friendly)")
     p.add_argument("--yes", action="store_true", help="accept defaults, skip optional prompts")

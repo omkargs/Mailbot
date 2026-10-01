@@ -23,6 +23,10 @@ _tmp = tempfile.mkdtemp(prefix="mailagent-test-")
 os.environ["MAIL_AGENT_DB"] = str(Path(_tmp) / "test.db")
 os.environ["MAIL_AGENT_DATA_DIR"] = _tmp
 os.environ["MAIL_AGENT_CONFIG_DIR"] = str(Path(_tmp) / "config")
+# The voice profile lives in the repo's brain/ dir by default, which on a
+# real machine holds the user's actual profile. A test asserting "not learned
+# yet" must not read that file — isolate the brain like everything else.
+os.environ["MAIL_AGENT_BRAIN"] = str(Path(_tmp) / "brain")
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +38,7 @@ def clean_db():
     # Child tables first — drafts references runs, messages references accounts.
     for table in ("drafts", "approvals", "actions_log", "messages", "cursors",
                   "runs", "contacts", "skills", "labels", "usage_daily",
-                  "scheduled_jobs", "accounts"):
+                  "scheduled_jobs", "surfaced", "accounts"):
         with db.db() as c:
             c.execute(f"DELETE FROM {table}")
     # Spend limits are process-global so every thread shares one budget. Reset
@@ -146,4 +150,9 @@ def cfg():
     c.agent.daily_token_cap = 10_000_000
     # A dummy key so build_client does not refuse before the mock intercepts.
     c.router.api_key = "test-key-not-real"
+    # These tests exercise the flagship path, not the decider. Jev stays ON
+    # in production (it falls back to the router's own URL/key, which is how
+    # Bynara serves the `jev` model); here there is no network, so the suite
+    # says explicitly which brain it is testing. test_jev.py enables it.
+    c.jev.enabled = False
     return c

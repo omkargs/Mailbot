@@ -145,6 +145,139 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             return f"Could not: {res.get('error', 'unknown')}"
         return "Sent." if res.get("sent") else "Discarded."
 
+    def approve_all() -> str:
+        """Approve everything queued, in one word.
+
+        Convenience, not a bypass. Each approval is still claimed atomically
+        and re-validated at execution (kill switch, injection, hash), so a bulk
+        approve cannot send something a single approve would have held. A
+        summary names every id that went out, because "sent 3" without saying
+        which 3 is not a report.
+        """
+        from .runner import run_approval
+
+        pend = db.pending_approvals()
+        if not pend:
+            return "Nothing waiting for approval."
+        sent: list[str] = []
+        held: list[str] = []
+        for p in pend:
+            prov = _provider_for(p["account"])
+            if not prov:
+                held.append(f"{p['id']} (account not connected)")
+                continue
+            try:
+                res = run_approval(p["account"], prov, cfg, p["id"], True, notify=None)
+            except Exception as e:
+                held.append(f"{p['id']} ({type(e).__name__})")
+                continue
+            (sent if res.get("sent") else held).append(p["id"])
+        out = f"Sent {len(sent)}."
+        if sent:
+            out += "\n" + "\n".join(f"  ✓ {i}" for i in sent)
+        if held:
+            out += "\nStill held:\n" + "\n".join(f"  · {i}" for i in held)
+        return out
+
+    # -------------------------------------------------------------- security
+    def security() -> str:
+        """The authority model, in the operator's hands.
+
+        Nine gates, in order, and a run of them is the reason a message was
+        held. Printed rather than paraphrased: "the agent decided not to send"
+        is not an answer anybody can act on.
+        """
+        from ..agent import guards
+
+        j = cfg.jev
+        url, key, model = j.endpoint(cfg.router)
+        allowed = [r["address"] for r in db.list_contacts(limit=200) if r["auto_send_ok"]]
+        lines = [
+            "*Send authority* — the model proposes, this code decides.",
+            "",
+            f"send_mode: {cfg.agent.send_mode}"
+            + ("  ← kill switch is ON, nothing sends at all"
+               if cfg.agent.send_mode == "never" else ""),
+            f"account auto-send: {'ON' if getattr(cfg.google, 'auto_send', False) else 'off'}",
+            f"auto-send contacts: {', '.join(allowed) if allowed else 'none — everything queues'}",
+            f"never-auto-send: {', '.join(cfg.agent.never_auto_send) or 'none'}",
+            f"escalation keywords: {len(cfg.agent.escalation_keywords)} armed",
+            "",
+            "*Gates, in order* — each one found can only make it stricter:",
+            "  1. kill switch  (send_mode=never)",
+            "  2. never-list   (wins over the allowlist)",
+            "  3. account authority",
+            "  4. contact standing: allowlist, an approved contact, or an established two-way thread",
+            "  5. prompt-injection signals in the content",
+            "  6. escalation keywords (money, contract, credential, health)",
+            "  7. attachments on an outbound reply",
+            "  8. reply to a contact with no prior thread",
+            "  9. body too short to have been individually written",
+            "",
+            f"*Decider* — Jev {'on' if j.enabled and url and key else 'off'}"
+            + (f" at {url}/v1/systemone, model {model}" if url and key else
+               " — unset, so the flagship reads every message"),
+            "",
+            "A queued send is re-checked at execution: kill switch, injection and",
+            "address validity are all re-validated after you approve, because the",
+            "world can change between the card and the send.",
+        ]
+        assert guards  # gates live here; referenced so the import is honest
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ jev
+    def jev(text: str = "") -> str:
+        """The decider's live config, its recent verdicts, and how to tune it.
+
+        A second brain nobody can inspect is just an unaccountable one. This
+        shows the thresholds actually in force and what Jev last decided, so
+        "why did it file that" has an answer that is not the source code.
+        """
+        from ..agent import jev as jev_mod
+        from ..config import CONFIG_DIR
+
+        import re as _re
+        body = _re.sub(r"^/jev\s*", "", (text or "").strip())
+        parts = body.split()
+        tuning = {"conf": ("JEV_MIN_CONFIDENCE", "min_confidence"),
+                  "needs": ("JEV_NEEDS_CUT", "needs_cut"),
+                  "file": ("JEV_FILE_NEEDS_CUT", "file_needs_cut")}
+        if len(parts) >= 2 and parts[0] in tuning:
+            env, attr = tuning[parts[0]]
+            try:
+                val = float(parts[1])
+            except ValueError:
+                return f"usage: /jev {parts[0]} <0-1>"
+            if not 0.0 < val < 1.0:
+                return f"{parts[0]} must be between 0 and 1."
+            return (f"To set {env}={val}, edit {CONFIG_DIR / '.secrets'} and restart "
+                    f"the daemon.\nCurrently {env}={getattr(cfg.jev, attr)}")
+
+        j = cfg.jev
+        url, key, model = j.endpoint(cfg.router)
+        out = [
+            "*Jev — the fast decider*",
+            "",
+            f"state: {'on' if jev_mod.enabled(cfg) else 'off'}",
+            f"endpoint: {(url + '/v1/systemone') if url else 'unset'}",
+            f"key: {'set' if key else 'UNSET'}",
+            f"model: {model}",
+            "",
+            f"thresholds: conf ≥ {j.min_confidence} · needs > {j.needs_cut} · "
+            f"file-needs > {j.file_needs_cut} · sensitivity ≥ 2 → ASK",
+        ]
+        if not jev_mod.enabled(cfg):
+            out += ["", "Jev is off, so every message reaches the flagship "
+                        "directly. Set JEV_ENABLED=1 and give it an endpoint."]
+        with db.db() as c:
+            rows = c.execute(
+                "SELECT ts, detail FROM actions_log WHERE action='jev' "
+                "ORDER BY id DESC LIMIT 5").fetchall()
+        out += ["", "*last verdicts*"]
+        out += [f"  {r['ts'][:19]}  {r['detail']}" for r in rows] or ["  none yet"]
+        out += ["", "tune: /jev conf 0.7 · /jev needs 0.6 · /jev file 0.8"]
+        return "\n".join(out)
+
     # ----------------------------------------------------------------- brain
     def brain() -> str:
         provs = _providers()
@@ -302,6 +435,9 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         "scan": scan,
         "drafts": drafts,
         "approve": approve,
+        "approve_all": approve_all,
+        "jev": jev,
+        "security": security,
         "brain": brain,
         "voice": voice,
         "skill": skill,
