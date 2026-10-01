@@ -627,6 +627,21 @@ def _step_service(state: dict, auto: bool = False) -> None:
     if up:
         print("  service running — it survives reboot, restarts on crash.")
         state["service"] = "ok"
+    # `mail-agent` on PATH: without this the next thing the user types
+    # (`mail-agent status`) answers "command not found".
+    try:
+        bindir = _Path.home() / ".local" / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        link = bindir / "mail-agent"
+        target = venv_bin / "mail-agent"
+        if target.exists():
+            if link.is_symlink() or not link.exists():
+                if link.is_symlink():
+                    link.unlink()
+                link.symlink_to(target)
+                print("  `mail-agent` is now on your PATH (re-open the shell if unknown).")
+    except OSError:
+        pass
     else:
         print("  ! installed but did not start — logs: "
               "`journalctl --user -u mail-agent.service -n 30`")
@@ -1158,7 +1173,8 @@ def cmd_setup(args, cfg) -> int:
         if creds.exists():
             p = build_providers(fresh).get("google")
             if p and p.valid():
-                print(f"  google OK: already signed in as {p.address}")
+                print(f"  google OK: already signed in"
+                      f"{f' as {p.address}' if p.address else ' (address resolves on next run)'})")
                 state["google"] = "ok"
             elif non_interactive:
                 print("  ! google token missing — run `mail-agent setup --step google` "
@@ -1204,7 +1220,13 @@ def cmd_setup(args, cfg) -> int:
             print("  New mail then wakes the agent in seconds. Without it the")
             print("  agent polls on an interval instead — slower, same bills.")
             try:
-                pw = input("  App password (empty skips push): ").strip().replace(" ", "")
+                import getpass as _gp
+
+                try:
+                    pw = _gp.getpass("  App password (hidden, empty skips push): ")
+                except Exception:
+                    pw = input("  App password (empty skips push): ")
+                pw = pw.strip().replace(" ", "")
             except (EOFError, KeyboardInterrupt, OSError):
                 pw = ""
             if not pw:
@@ -1216,8 +1238,15 @@ def cmd_setup(args, cfg) -> int:
                 state["push"] = "failed"
             else:
                 _write_p("GOOGLE_IMAP_PASSWORD", pw)
-                print("  push OK: app password stored (600).")
-                state["push"] = "ok"
+                # Prove it landed: re-read and count, so "stored" always
+                # means verifiably on disk, never assumed.
+                got = (_read_p().get("GOOGLE_IMAP_PASSWORD") or "").replace(" ", "")
+                if len(got) != 16:
+                    print("  ! write did not stick — try `mail-agent setup --step push` again.")
+                    state["push"] = "failed"
+                else:
+                    print("  push OK: app password stored (600), verified on disk.")
+                    state["push"] = "ok"
     else:
         state.setdefault("push", "skipped")
 

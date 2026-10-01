@@ -215,28 +215,17 @@ def cmd_brain(args, cfg):
             except Exception:
                 continue
                 seeded = []
-            # Batched bodies in small chunks with breathing room. Fetching
-            # hundreds of sent messages at once trips Gmail's per-minute
-            # quota partway through — and the old code then fell back to
-            # single fetches, which is exactly how a quota blip becomes a
-            # 403 storm. A failed chunk is skipped, not retried into the
-            # ground; re-running later fills the gaps.
-            import time as _time
+            # Paced chunk fetch (see brain.style.fetch_bodies): one big batch
+            # trips Gmail's per-minute quota halfway, and single-fetch
+            # fallback turns the blip into a 403 storm.
+            from .brain.style import fetch_bodies
 
             ids = [m["id"] for m in msgs][:args.limit]
-            fulls = []
-            for i in range(0, len(ids), 25):
-                try:
-                    fulls += p.get_messages(ids[i:i + 25])
-                except Exception as e:
-                    log.warning("sent-folder chunk %d failed (%s); skipping",
-                                i // 25, type(e).__name__)
-                    if "quota" in str(e).lower() or "403" in str(e):
-                        print("  Gmail quota hit — keeping what was mined; "
-                              "re-run `mail-agent brain` later for the rest.")
-                        break
-                _time.sleep(2)
-            by_id = {f["id"]: f for f in fulls}
+            by_id = fetch_bodies(p, ids)
+            if len(by_id) < len(ids):
+                print("  Gmail quota hit — keeping what was mined; "
+                      "re-run `mail-agent brain` later for the rest.")
+            fulls = list(by_id.values())
             for m in msgs:
                 full = by_id.get(m["id"])
                 if full:

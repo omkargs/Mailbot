@@ -681,6 +681,26 @@ def test_verify_jev_answers(monkeypatch):
     assert ok and "jev" in detail
 
 
+def test_write_secret_refuses_blank(tmp_path, monkeypatch):
+    from mailbot import setup as S
+
+    monkeypatch.setattr(S, "config_dir", lambda: tmp_path)
+    try:
+        S.write_secret("GOOGLE_IMAP_PASSWORD", "   ")
+        raise SystemExit("should have raised")
+    except ValueError as e:
+        assert "refusing to blank" in str(e)
+    assert not (tmp_path / ".secrets").exists()
+
+
+def test_fetch_bodies_paces_and_skips(provider):
+    from mailbot.brain.style import fetch_bodies
+
+    provider.inbox.append({"id": "s1", "body": "one"})
+    out = fetch_bodies(provider, ["s1", "missing"], chunk=1, pause_sec=0)
+    assert out["s1"]["body"] == "one" and "missing" not in out
+
+
 def test_verify_jev_fails_closed(monkeypatch):
     from mailbot import wizard as W
 

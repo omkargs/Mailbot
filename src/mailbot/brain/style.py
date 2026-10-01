@@ -83,6 +83,35 @@ def clean_text(body: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def fetch_bodies(provider, ids: list[str], chunk: int = 25,
+                 pause_sec: float = 2.0) -> dict[str, dict[str, Any]]:
+    """Full bodies for sent-mail mining, paced for Gmail's quota.
+
+    One big batch trips the per-minute limit halfway; falling back to
+    single fetches then turns a blip into a 403 storm. Small chunks with
+    breathing room instead — a dead chunk is skipped, and re-running later
+    fills the gaps. Returns {id: message}.
+    """
+    import logging as _logging
+    import time as _time
+
+    log = _logging.getLogger(__name__)
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(ids), chunk):
+        try:
+            for f in provider.get_messages(ids[i:i + chunk]) or []:
+                if f and f.get("id"):
+                    out[f["id"]] = f
+        except Exception as e:
+            text = str(e)
+            log.warning("sent-mail chunk %d failed (%s); skipping",
+                        i // chunk, type(e).__name__)
+            if "quota" in text.lower() or "403" in text or "429" in text:
+                break
+        _time.sleep(pause_sec)
+    return out
+
+
 def _sent_samples(account: str, limit: int = 400) -> list[dict[str, Any]]:
     """Recent hand-written sent messages.
 

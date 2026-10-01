@@ -93,7 +93,13 @@ def write_secret(key: str, value: str) -> None:
 
     Uses the same single-quote escaping the reader understands, so a value
     containing a quote round-trips instead of being truncated.
+
+    Refuses empty values LOUDLY. A blank credential written over a good one
+    is silent data loss — it once sailed through as "stored" while push
+    stayed down. Every caller must check before calling.
     """
+    if not (value or "").strip():
+        raise ValueError(f"refusing to blank {key}: pass a real value or don't call")
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
@@ -234,8 +240,14 @@ def step_google(state: dict[str, Any]) -> None:
 
     p2 = build_providers(load()).get("google")
     if p2 and p2.valid():
-        write_secret("GOOGLE_ACCOUNT", p2.address)
-        ok(f"signed in as {p2.address}")
+        if p2.address:
+            write_secret("GOOGLE_ACCOUNT", p2.address)
+            ok(f"signed in as {p2.address}")
+        else:
+            # Address resolution failed (usually a rate-limit blip mid-setup).
+            # The token is valid; the name arrives on the next run. Writing a
+            # blank here would namelessly break every chat header after it.
+            ok("signed in (address lookup failed — resolves on next run)")
         state["google"] = "ok"
     else:
         bad("sign-in did not complete")
@@ -408,16 +420,12 @@ def step_voice(state: dict[str, Any]) -> None:
         return
     info("reading your sent mail to learn how you write (this takes a minute)…")
     try:
-        from .brain.style import build_profile
+        from .brain.style import build_profile, fetch_bodies
         from .storage import db
 
         db.migrate()
         msgs = p.list_messages(folder="SENT", limit=300)
-        by_id = {}
-        try:
-            by_id = {f["id"]: f for f in p.get_messages([m["id"] for m in msgs][:200])}
-        except Exception:
-            pass
+        by_id = fetch_bodies(p, [m["id"] for m in msgs][:200])
         kept = 0
         for m in msgs:
             f = by_id.get(m["id"])
