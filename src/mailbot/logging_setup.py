@@ -79,7 +79,7 @@ def setup(level: int = logging.INFO, logfile: str | Path | None = None) -> None:
     # of the setup wizard. Hardcoded names will drift again; this cannot.
     _NOISY_ROOTS = {
         "httpx", "httpx2", "httpcore", "httpcore2", "urllib3", "requests",
-        "googleapiclient", "google", "msal", "anthropic", "mcp", "openai",
+        "googleapiclient", "google", "msal", "anthropic", "openai",
     }
     for name in list(logging.root.manager.loggerDict):
         if name.split(".")[0] in _NOISY_ROOTS:

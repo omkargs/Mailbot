@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "omkargs" }]
-keywords = ["email", "gmail", "outlook", "mcp", "agent", "anthropic", "automation"]
+keywords = ["email", "gmail", "outlook", "agent", "anthropic", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,7 +26,6 @@ dependencies = [
     "google-api-python-client>=2.0.0,<3.0.0",
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0,<2.0.0",
-    "mcp>=1,<2",
     "msal>=1.28.0",
     "requests>=2.31.0",
 ]

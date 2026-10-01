@@ -42,10 +42,15 @@ IMPORT_KEYS = (
     "ROUTER_API_KEY",
     "ROUTER_MODEL",
     "ROUTER_TRIAGE_MODEL",
+    "JEV_ENABLED",
+    "JEV_BASE_URL",
+    "JEV_API_KEY",
+    "JEV_MODEL",
     "GOOGLE_CREDENTIALS",
     "GOOGLE_ACCOUNT",
     "GOOGLE_DISPLAY_NAME",
     "GOOGLE_CALENDAR_ENABLED",
+    "GOOGLE_IMAP_PASSWORD",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "DISCORD_BOT_TOKEN",
@@ -526,6 +531,39 @@ def _retry_provider_key(base: str, key: str, model: str, key_help,
     return res, key, False
 
 
+def verify_jev(base_url: str, api_key: str, model: str = "jev",
+               timeout: int = 20) -> tuple[bool, str]:
+    """Ask the decider one trivial question. Used by the setup step AND the
+    doctor, so "jev is configured" always means "jev answered", never "keys
+    exist". Returns (ok, detail). Never raises."""
+    import json
+    import urllib.request
+
+    if not (base_url or "").strip() or not (api_key or "").strip():
+        return False, "no endpoint or key"
+    try:
+        req = urllib.request.Request(
+            base_url.rstrip("/") + "/v1/systemone",
+            data=json.dumps({
+                "model": model or "jev",
+                "state": "connectivity check from the mailbot installer",
+                "questions": {"ok": {
+                    "type": "noul",
+                    "instructions": "this is a connectivity check, not a real judgment",
+                }},
+            }).encode(),
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode() or "{}")
+        if isinstance(body, dict) and "answers" in body:
+            return True, f"answered as {model or 'jev'}"
+        return False, "unexpected response shape"
+    except Exception as e:
+        return False, type(e).__name__
+
+
 def _run_voice(state: dict) -> None:
     if state.get("google") == "ok":
         try:
@@ -638,7 +676,7 @@ def _test_notify(which: str) -> bool:
 
 # Every --step value this command understands. Kept in one place so the
 # validator and the plan builder cannot drift apart.
-SETUP_STEPS = {"provider", "google", "chat", "voice", "start", "add-inbox"}
+SETUP_STEPS = {"provider", "jev", "google", "push", "chat", "voice", "start"}
 
 
 def cmd_setup(args, cfg) -> int:
@@ -680,16 +718,11 @@ def cmd_setup(args, cfg) -> int:
             print(f"  Still needs you: {', '.join(failed)} (will retry)")
 
     # Plan the run so output reads [1/3] [2/3] and --dry-run can print it.
-    # add-inbox is standalone: a full run never invents inboxes.
     if getattr(args, "print_auth_url", False):
         # One string and out. Headless users otherwise run a whole wizard
         # to obtain a URL, then write a script to produce it.
         from .config import load as _load_url
         creds_file = Path(_load_url().google.credentials_file)
-        pid = (getattr(args, "for_profile", "") or "").strip()
-        if pid:
-            from . import profiles as _pr
-            creds_file = _pr.creds_file(pid)
         if not creds_file.exists():
             print(f"  no credentials file at {creds_file}")
             print("  Finish the Google console steps first, or paste the JSON:")
@@ -702,13 +735,15 @@ def cmd_setup(args, cfg) -> int:
             return 1
         return 0
 
-    if only == "add-inbox":
-        return _step_add_inbox(state)
     plan = []
     if not only or only == "provider":
         plan.append("provider")
+    if not only or only == "jev":
+        plan.append("jev")
     if not only or only == "google":
         plan.append("google")
+    if (not only or only == "push") and not yes:
+        plan.append("push")
     if (not only or only == "chat") and not yes:
         plan.append("chat")
     if (not only or only == "voice") and not skip_voice:
@@ -952,6 +987,67 @@ def cmd_setup(args, cfg) -> int:
         else:
             state["provider"] = "missing-key"
 
+    # --- jev: the fast decider that sorts mail before the flagship ---
+    if not only or only == "jev":
+        idx += 1
+        _hdr(idx, "jev — the fast decider")
+        from .setup import read_secrets as _read_s, write_secret as _write_s
+
+        s = _read_s()
+        if non_interactive or fast or not _tty():
+            # Agents and fast runs: import_env already copied JEV_*; the
+            # endpoint falls back to the provider's, so "no answers" still
+            # means "on, sharing the router" unless explicitly disabled.
+            if s.get("JEV_ENABLED", "1") == "0":
+                print("  jev: off (JEV_ENABLED=0)")
+                state["jev"] = "off"
+            else:
+                _write_s("JEV_ENABLED", "1")
+                state["jev"] = "unverified"
+        else:
+            print("  Jev sorts each mail in milliseconds for cents, so the")
+            print("  flagship only reads what deserves a reply. It lives on")
+            print("  the same router by default — separate keys are only for")
+            print("  providers that don't serve it.")
+            try:
+                use = input("  Use the Jev decider? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt, OSError):
+                use = "n"
+            if use in ("n", "no"):
+                _write_s("JEV_ENABLED", "0")
+                print("  jev off — the flagship reads every message itself.")
+                state["jev"] = "off"
+            else:
+                _write_s("JEV_ENABLED", "1")
+                base_d = s.get("ROUTER_BASE_URL", "")
+                try:
+                    url = input("  Jev endpoint [same as provider]: ").strip()
+                    key = input("  Jev key [same as provider key]: ").strip()
+                    mdl = input("  Jev model [jev]: ").strip() or "jev"
+                except (EOFError, KeyboardInterrupt, OSError):
+                    url, key, mdl = "", "", "jev"
+                if url:
+                    _write_s("JEV_BASE_URL", url)
+                if key:
+                    _write_s("JEV_API_KEY", key)
+                _write_s("JEV_MODEL", mdl)
+                eff_url = url or base_d
+                eff_key = key or s.get("ROUTER_API_KEY", "")
+                if not eff_url or not eff_key:
+                    print("  ! no endpoint/key yet — Jev stays configured but "
+                          "unverified; it fails closed to the flagship until then.")
+                    state["jev"] = "unverified"
+                else:
+                    print("  asking Jev one question to prove it answers…")
+                    ok, detail = verify_jev(eff_url, eff_key, mdl)
+                    if ok:
+                        print(f"  jev OK: {detail}")
+                        state["jev"] = "ok"
+                    else:
+                        print(f"  ! jev did not answer ({detail}) — keys saved, "
+                              "flagship covers until it does.")
+                        state["jev"] = "failed"
+
     # --- google ---
     if not only or only == "google":
         idx += 1
@@ -1004,6 +1100,45 @@ def cmd_setup(args, cfg) -> int:
                 else:
                     print("  ! google sign-in did not complete")
                     state["google"] = "failed"
+
+    # --- push: wake on new mail instead of polling for it ---
+    if (not only or only == "push") and not yes:
+        idx += 1
+        _hdr(idx, "push (wake on new mail)")
+        from .setup import read_secrets as _read_p, write_secret as _write_p
+
+        s = _read_p()
+        if state.get("google") != "ok":
+            print("  ! skipping — sign into Google first, then re-run "
+                  "`mail-agent setup --step push`.")
+            state.setdefault("push", "skipped")
+        elif s.get("GOOGLE_IMAP_PASSWORD"):
+            print("  push: app password stored — IDLE watcher will run.")
+            state["push"] = "ok"
+        elif not _tty():
+            state.setdefault("push", "skipped")
+        else:
+            print("  Gmail → Google Account → Security → 2-Step Verification →")
+            print("  App passwords → create one named 'mailbot' → paste it.")
+            print("  New mail then wakes the agent in seconds. Without it the")
+            print("  agent polls every few minutes instead — slower, same bills.")
+            try:
+                pw = input("  App password (empty skips push): ").strip().replace(" ", "")
+            except (EOFError, KeyboardInterrupt, OSError):
+                pw = ""
+            if not pw:
+                print("  push skipped — interval polling covers you.")
+                state.setdefault("push", "skipped")
+            elif len(pw) != 16:
+                print(f"  ! that is {len(pw)} characters; app passwords are 16 — "
+                      "not saved. Re-run `mail-agent setup --step push` with the real one.")
+                state["push"] = "failed"
+            else:
+                _write_p("GOOGLE_IMAP_PASSWORD", pw)
+                print("  push OK: app password stored (600).")
+                state["push"] = "ok"
+    else:
+        state.setdefault("push", "skipped")
 
     # --- chat (optional, skipped with --yes / --fast) ---
     if (not only or only == "chat") and not yes:
@@ -1100,8 +1235,6 @@ def cmd_setup(args, cfg) -> int:
 
 def _print_availability(state: dict, cfg) -> None:
     """What works, what's missing, where the files live. One screen."""
-    from . import profiles as _profiles
-
     s = read_secrets()
     if state.get("provider") == "ok":
         prov = f"OK ({s.get('ROUTER_MODEL', '?')})"
@@ -1109,6 +1242,17 @@ def _print_availability(state: dict, cfg) -> None:
         prov = "missing — need API key"
     tri = s.get("ROUTER_TRIAGE_MODEL", "")
     tri = f"two-brain ({tri})" if tri else "off (flagship does triage)"
+    jev_state = state.get("jev", "")
+    if jev_state == "ok":
+        decider = f"OK ({s.get('JEV_MODEL', 'jev')})"
+    elif jev_state == "off":
+        decider = "off (flagship reads everything)"
+    elif jev_state:
+        decider = f"{jev_state} — run `mail-agent setup --step jev`"
+    else:
+        decider = "unconfigured — run `mail-agent setup --step jev`"
+    push = {"ok": "IDLE (wake on mail)"}.get(state.get("push", ""),
+                                             state.get("push", "polling"))
     if state.get("google") == "ok":
         box = "OK"
     else:
@@ -1118,110 +1262,15 @@ def _print_availability(state: dict, cfg) -> None:
               ("Slack", state.get("slack"))) if v == "ok"]
     chat = ", ".join(chats) if chats else "skipped (optional)"
     voice = {"ok": "learned"}.get(state.get("voice", ""), state.get("voice", "skipped"))
-    cur = None
-    try:
-        cur = _profiles.get_current()
-    except Exception:
-        pass
-    prof = f"{cur['name']} ({cur['account']})" if cur else "personal"
     print("\n  What works:")
     print(f"    brain ..... {prov}")
     print(f"    triage .... {tri}")
+    print(f"    decider ... {decider}")
     print(f"    mailbox ... {box}")
+    print(f"    push ...... {push}")
     print(f"    chat ...... {chat}")
     print(f"    voice ..... {voice}")
-    print(f"    profile ... {prof}")
     print(f"  Files: {config_dir()}/config.json, .secrets (600), google-token.json")
-
-
-def _step_add_inbox(state: dict) -> int:
-    """Add another Gmail inbox as its own profile: own OAuth files, own
-    voice, own model override. Reuses the paste-JSON + headless auth flow."""
-    from . import profiles as _profiles
-    from .providers import build_providers
-    from .config import load as _load
-
-    print("\n  Add another inbox. Each inbox gets its own profile, voice,")
-    print("  and credentials — family mail never trains the company voice.")
-    if not _tty():
-        print("  ! needs a terminal (paste + browser flow). Re-run on a TTY.")
-        return 1
-    try:
-        name = input("  Profile name (e.g. Family, Company): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return 1
-    if not name:
-        print("  ! a name is required")
-        return 1
-    pid = _profiles.slug(name)
-    account = f"google:{pid}"
-    try:
-        _profiles.add_profile(name, account)
-    except ValueError as e:
-        print(f"  ! {e}")
-        return 1
-    creds = _profiles.creds_file(pid)
-    primary = Path(_load().google.credentials_file)
-    if not creds.exists() and primary.exists():
-        # A Google Desktop client identifies the *app*, not the user. One
-        # client can serve any number of accounts — you just sign in as
-        # whoever you want at the consent screen, and the token comes back
-        # for that account. Sending someone back through the Cloud Console
-        # to build a second identical client costs five minutes and gains
-        # nothing.
-        print(f"\n  Step 1/2 — OAuth client for {name}:")
-        ans = ""
-        try:
-            ans = input(f"  Reuse the one already on this box? [{primary.name}] [Y/n]: ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 1
-        ans = ans.strip().lower()
-        if ans in ("", "y", "yes"):
-            try:
-                creds.parent.mkdir(parents=True, exist_ok=True)
-                creds.write_text(primary.read_text())
-                creds.chmod(0o600)
-            except OSError as e:
-                print(f"  ! could not copy {primary}: {e}")
-                return 1
-            print(f"  reusing {primary}")
-            print("  One Desktop client works for any number of accounts. You")
-            print("  just sign in as the new one when the consent page opens.")
-        else:
-            print("    Paste a NEW OAuth client JSON below, then a blank line.")
-            if not collect_credentials_json(creds):
-                print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
-                return 1
-    else:
-        print(f"\n  Step 1/2 — OAuth client JSON for {name}:")
-        print("    Cloud Console → Credentials → OAuth client ID → Desktop app →")
-        print("    download the JSON, then paste it below.")
-        if not collect_credentials_json(creds):
-            print("  ! no credentials stored — re-run `mail-agent setup --step add-inbox`")
-            return 1
-    print(f"\n  Step 2/2 — sign in {name}:")
-    token = _profiles.token_file(pid)
-    if not headless_google_auth(creds, out_token=token):
-        print("  ! sign-in did not complete")
-        return 1
-    p = build_providers(_load()).get(account)
-    if p and p.valid():
-        from .storage import db as _db
-
-        # New inboxes start conservative: account-level auto-send off until
-        # the owner approves contacts. Address lives in the accounts table,
-        # never in shared secrets (GOOGLE_ACCOUNT stays the primary inbox).
-        _db.upsert_account(account, p.address, name,
-                           auto_send=False, calendar=True)
-        print(f"  inbox OK: {name} signed in as {p.address}")
-        print(f"  voice: run `mail-agent brain` to learn {name}'s writing")
-        print(f"  chat: /profiles, then /change-profile {pid}")
-        _save_state({**state, f"inbox-{pid}": "ok"})
-        return 0
-    print("  ! sign-in did not verify")
-    return 1
 
 
 def cmd_doctor(args, cfg) -> int:
@@ -1275,6 +1324,19 @@ def cmd_doctor(args, cfg) -> int:
     check("telegram configured",
           bool(s.get("TELEGRAM_BOT_TOKEN") and s.get("TELEGRAM_CHAT_ID")),
           "optional — mail-agent setup --step chat", required=False)
+    if s.get("JEV_ENABLED", "1") == "0":
+        check("jev decider", False, "off — flagship reads everything "
+              "(mail-agent setup --step jev to enable)", required=False)
+    else:
+        jurl = s.get("JEV_BASE_URL") or s.get("ROUTER_BASE_URL", "")
+        jkey = s.get("JEV_API_KEY") or s.get("ROUTER_API_KEY", "")
+        jmodel = s.get("JEV_MODEL", "jev")
+        ok, detail = verify_jev(jurl, jkey, jmodel) if (jurl and jkey) else (False, "no endpoint/key")
+        check("jev decider reachable", ok,
+              f"{detail} — mail-agent setup --step jev" if not ok else "")
+    check("gmail push (IDLE)", bool(s.get("GOOGLE_IMAP_PASSWORD")),
+          "optional — app password, else interval polling "
+          "(mail-agent setup --step push)", required=False)
     try:
         from .storage import db
 

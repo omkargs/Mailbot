@@ -829,7 +829,8 @@ def main() -> int:
     p.add_argument("--non-interactive", action="store_true", help="never prompt; read from env")
     p.add_argument("--import-env", action="store_true", help="copy known env vars into .secrets")
     p.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
-    p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start|verify")
+    p.add_argument("--step", default="",
+                   help="run one step: provider|jev|google|push|chat|voice|start|verify")
     p.add_argument("--print-auth-url", action="store_true",
                    help="print the Google consent URL and exit (headless boxes)")
     p.add_argument("--for-profile", default="",
@@ -853,12 +854,6 @@ def main() -> int:
         return run_demo()
     p.set_defaults(fn=_fn_demo)
 
-    p = sub.add_parser("mcp", help="serve the mailbox as MCP tools over stdio")
-    def _fn_mcp(a, c):
-        from .mcp_server import cmd_mcp
-        return cmd_mcp(a, c)
-    p.set_defaults(fn=_fn_mcp)
-
     p = sub.add_parser("dossier", help="your persona, mined from your own mailbox")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--account", default="", help="inbox account (default: current profile)")
@@ -866,31 +861,6 @@ def main() -> int:
         from .dossier import cmd_dossier
         return cmd_dossier(a, c)
     p.set_defaults(fn=_fn_dossier)
-
-    p = sub.add_parser("profiles", help="list inbox profiles")
-    def _fn_profiles(a, c):
-        from . import profiles as _profiles
-        _profiles.ensure_migrated()
-        rows = _profiles.list_profiles()
-        if not rows:
-            print("no profiles yet — run `mail-agent setup`")
-            return 1
-        cur = _profiles.get_current()
-        for r in rows:
-            mark = "●" if cur and r["id"] == cur["id"] else "○"
-            addr = ""
-            try:
-                from .storage import db as _db
-                with _db.db() as _c:
-                    arow = _c.execute("SELECT address FROM accounts WHERE id=?",
-                                      (r["account"],)).fetchone()
-                    addr = (arow["address"] or "") if arow else ""
-            except Exception:
-                pass
-            model = (r.get("model_override") or "").strip() or "(first provider)"
-            print(f"  {mark} {r['name']:<16} {addr or r['account']:<28} model: {model}")
-        return 0
-    p.set_defaults(fn=_fn_profiles)
 
     args = ap.parse_args()
     if not args.cmd:

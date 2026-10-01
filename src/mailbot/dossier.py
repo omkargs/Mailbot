@@ -98,20 +98,12 @@ def render(d: dict) -> str:
 
 
 def cmd_dossier(args, cfg) -> int:
-    from . import profiles as _profiles
-
-    _profiles.ensure_migrated()
-    cur = _profiles.get_current()
-    account = cur["account"] if cur else "google"
-    if getattr(args, "account", ""):
-        account = args.account
+    account = getattr(args, "account", "") or "google"
     d = build_dossier(account, cfg)
     if getattr(args, "json", False):
         import json as _json
 
         print(_json.dumps(d, indent=2))
     else:
-        tag = _profiles.header_for(cur, account)
-        print(f"{tag} " if tag else "", end="")
         print(render(d))
     return 0

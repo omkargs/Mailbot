@@ -34,6 +34,27 @@ def test_memory_still_scoped_by_account():
     assert [t["content"] for t in chatlog.recent(account="work")] == ["work thread"]
 
 
+def test_chat_history_is_scoped_to_one_inbox():
+    """Two mailboxes must not read each other's conversation, even though
+    the tables are shared. Same rule as chats: the key is always both."""
+    from mailbot.agent import chatlog
+
+    chatlog.record("user", "the invoice question", account="google")
+    chatlog.record("agent", "she said the 3rd", account="google")
+    chatlog.record("user", "unrelated work thread", account="work")
+
+    google = [t["content"] for t in chatlog.recent(account="google")]
+    work = [t["content"] for t in chatlog.recent(account="work")]
+
+    assert google == ["the invoice question", "she said the 3rd"]
+    assert work == ["unrelated work thread"]
+
+    # Forgetting one inbox's thread must not wipe the other's.
+    assert chatlog.clear(account="google") == 2
+    assert chatlog.recent(account="google") == []
+    assert len(chatlog.recent(account="work")) == 1
+
+
 def test_handle_text_routes_plain_chat_per_chat(cfg):
     from mailbot.agent.chat import handle_text
 
@@ -89,6 +110,17 @@ def test_telegram_poll_tags_owner_chat(monkeypatch):
     out = n.poll_once()
     assert out and out[0]["action"] == "chat"
     assert out[0]["chat"] == "telegram:8791132013"
+
+
+def test_profiles_commands_are_single_inbox(cfg):
+    from mailbot.agent.chat import handle_text
+    from mailbot.agent.chatops import build_chat_ops
+
+    ops = build_chat_ops(cfg, lambda: {}, notify=None)
+    assert "Single inbox" in handle_text("/profiles", cfg, {}, ops)
+    assert "Single inbox" in handle_text("/change-profile work", cfg, {}, ops)
+    out = handle_text("/whoami", cfg, {}, ops)
+    assert "inbox:" in out and "brain:" in out and "voice:" in out
 
 
 def test_sanitize_rewrites_model_cards():
