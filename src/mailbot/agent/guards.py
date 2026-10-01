@@ -127,6 +127,7 @@ def decide(
     attachments: bool = False,
     is_reply_to_unknown: bool = False,
     is_established_thread: bool = False,
+    jev_confident_act: bool = False,
 ) -> Decision:
     """Should this send go out unattended?
 
@@ -148,18 +149,25 @@ def decide(
     if not account_auto_send:
         return Decision(False, f"auto-send is off for account '{account}'", "high", ["account_off"])
 
-    # 4. Contact authority. Three routes to approval, in order:
+    # 4. Contact authority. Four routes to approval, in order:
     #      a. an explicit allowlist entry,
     #      b. a contact the user approved at some point,
-    #      c. an established two-way thread.
+    #      c. an established two-way thread,
+    #      d. a high-margin Jev ACT on a consequence-free message.
     #    (c) exists because requiring a manual allowlist entry made auto mode
     #    useless in practice: the agent replied to nobody until the user
     #    pre-approved every correspondent, and queued everything else forever.
     #    Continuing a conversation the user is already having is not a cold
-    #    send. The cold-thread gate below still blocks first contact, and the
-    #    escalation and injection gates still apply.
+    #    send.
+    #    (d) is the approve-fatigue fix. A routine "confirming Friday works"
+    #    to someone the user has never approved still queued forever, so the
+    #    operator approved the same class of mail daily. A high-margin ACT
+    #    with no money, commitment, sensitivity or cold signals opens this
+    #    gate — and ONLY this gate. Injection, escalation, attachments and
+    #    the new-thread gate below all still apply unchanged.
     allowed_contacts = {normalize_address(a) for a in cfg.auto_send_contacts}
-    if not (contact_auto_send or addr in allowed_contacts or is_established_thread):
+    via_jev = bool(jev_confident_act)
+    if not (contact_auto_send or addr in allowed_contacts or is_established_thread or via_jev):
         return Decision(False, f"{addr} has not been approved for unattended replies", "high", ["not_approved"])
 
     # 5. Injection signals. Never auto-send on any of these.
@@ -197,6 +205,9 @@ def decide(
     if len(body.split()) < 4:
         return Decision(False, "body too short to have been individually written", "medium", ["too_short"])
 
+    if via_jev:
+        signals.append("jev-confident")
+        return Decision(True, "jev high-margin routine, no escalation signals", "low", signals)
     return Decision(True, "approved contact, no escalation signals", "low", signals)
 
 
@@ -211,6 +222,7 @@ def explain(
     attachments: bool = False,
     is_reply_to_unknown: bool = False,
     is_established_thread: bool = False,
+    jev_confident_act: bool = False,
 ) -> list[str]:
     """Every gate that fires, in order — not just the first one.
 
@@ -237,8 +249,10 @@ def explain(
         out.append(f"auto-send is off for account '{account}'")
 
     allowed = {normalize_address(a) for a in cfg.auto_send_contacts}
-    if not (contact_auto_send or addr in allowed or is_established_thread):
+    if not (contact_auto_send or addr in allowed or is_established_thread or jev_confident_act):
         out.append(f"{addr} has not been approved for unattended replies")
+    elif jev_confident_act and not (contact_auto_send or addr in allowed or is_established_thread):
+        out.append("standing via jev high-margin routine (no prior approval)")
 
     inj = detect_injection(hay)
     if inj:

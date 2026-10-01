@@ -53,7 +53,18 @@ class HookResult:
     reason: str = ""
 
 
-def _decide_send(addr: str, subject: str, body: str, ctx: dict[str, Any]) -> Any:
+def jev_endorsement(ctx: dict[str, Any], in_reply_to: str) -> bool:
+    """Does a Jev verdict endorse this send? Looked up by the message being
+    replied to — a verdict belongs to one message, and the reply inherits it.
+    New threads (no in_reply_to) never inherit anything."""
+    if not in_reply_to:
+        return False
+    v = (ctx.get("jev_by_id") or {}).get(in_reply_to)
+    return bool(v is not None and v.confident_auto)
+
+
+def _decide_send(addr: str, subject: str, body: str, ctx: dict[str, Any],
+                 jev_ok: bool = False) -> Any:
     """One recipient's send verdict under the caller's authority snapshot.
 
     The caller supplies standing two ways: precomputed `authorized` /
@@ -82,6 +93,7 @@ def _decide_send(addr: str, subject: str, body: str, ctx: dict[str, Any]) -> Any
         attachments=bool(ctx.get("attachments", False)),
         is_reply_to_unknown=bool(is_cold),
         is_established_thread=bool(established),
+        jev_confident_act=bool(jev_ok),
     )
 
 
@@ -111,10 +123,11 @@ def pre_tool_use(tool: str, args: dict[str, Any], ctx: dict[str, Any]) -> HookRe
         if ctx.get("direct_execute"):
             # No queue downstream — an allowed tool executes. Run the full
             # per-recipient gate here instead of the executor.
+            jev_ok = jev_endorsement(ctx, args.get("in_reply_to") or "")
             held = []
             for addr in to_addrs:
                 d = _decide_send(addr, args.get("subject", ""),
-                                 args.get("body", ""), ctx)
+                                 args.get("body", ""), ctx, jev_ok=jev_ok)
                 if not d.allowed:
                     held.append(f"{addr}: {d.reason}")
             if held:

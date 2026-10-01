@@ -138,6 +138,12 @@ class JevConfig:
     # genuinely needs a human is never filed on a confidence score alone.
     file_needs_cut: float = field(default_factory=lambda: float(_v("JEV_FILE_NEEDS_CUT", "0.7")))
     needs_cut: float = field(default_factory=lambda: float(_v("JEV_NEEDS_CUT", "0.5")))
+    # Margin routing (see agent/jev.py): a contested or coin-flip ACT is ASK.
+    ask_prob_floor: float = field(default_factory=lambda: float(_v("JEV_ASK_P", "0.35")))
+    min_margin: float = field(default_factory=lambda: float(_v("JEV_MARGIN", "0.15")))
+    # Autonomy endorsement: the bar for a verdict that may send by itself.
+    act_p: float = field(default_factory=lambda: float(_v("JEV_ACT_P", "0.8")))
+    auto_margin: float = field(default_factory=lambda: float(_v("JEV_AUTO_MARGIN", "0.2")))
     timeout: int = field(default_factory=lambda: int(_v("JEV_TIMEOUT", "20")))
 
     def endpoint(self, router: "RouterConfig") -> tuple[str, str, str]:

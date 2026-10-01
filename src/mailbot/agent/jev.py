@@ -90,6 +90,45 @@ QUESTIONS: dict[str, dict[str, Any]] = {
             "flagship": "Nuanced reply needing the best model and voice care",
         },
     },
+    # --- the autonomy six: what the extra questions buy ---
+    # Latency is flat per call (~2s for 8 or 16 questions), so these are
+    # free. Each one removes a class of approval spam or a class of
+    # cowardly escalation.
+    "reply_shape": {
+        "type": "choice",
+        "instructions": "If a reply is warranted, how much reply does it need",
+        "criteria": {
+            "none": "No reply at all",
+            "short": "A sentence or two closes it",
+            "full": "Needs a real, considered reply",
+        },
+    },
+    "money_involved": {
+        "type": "noul",
+        "instructions": "Money, payments, contracts, prices, or financial commitment are involved",
+    },
+    "commitment": {
+        "type": "noul",
+        "instructions": "A reply would commit the user to a plan, a price, a yes/no, or an opinion",
+    },
+    "emotion_heat": {
+        "type": "score",
+        "instructions": "How emotionally loaded this is — anger, grief, conflict, effusive thanks",
+        "criteria": ["flat routine", "warm human", "emotional", "handle with real care"],
+    },
+    "knows_user": {
+        "type": "noul",
+        "instructions": "The sender clearly knows the user personally, not a stranger or a list",
+    },
+    "thread_continuation": {
+        "type": "choice",
+        "instructions": "Where this sits in a conversation",
+        "criteria": {
+            "new": "Opens a new conversation",
+            "continuation": "Continues an existing back-and-forth",
+            "broadcast": "One-to-many mail, no conversation to continue",
+        },
+    },
 }
 
 ACT, ASK, FILE = "ACT", "ASK", "FILE"
@@ -100,7 +139,9 @@ class JevVerdict:
 
     __slots__ = ("verdict", "confidence", "needs_user", "sensitivity", "is_cold",
                  "needs_reply", "deadline", "importance", "draft_tier", "reason",
-                 "raw")
+                 "raw", "p_act", "p_ask", "margin", "money", "commitment",
+                 "emotion", "knows_user", "thread_continuation", "reply_shape",
+                 "deadline_p3", "auto_ok")
 
     def __init__(self, verdict: str = ASK, confidence: float = 0.0, **kw: Any):
         self.verdict = verdict
@@ -114,6 +155,21 @@ class JevVerdict:
         self.draft_tier = str(kw.get("draft_tier") or "flagship")
         self.reason = str(kw.get("reason") or "")
         self.raw = kw.get("raw") or {}
+        # Margin routing: how far ahead the winner is, and how strong the
+        # runner-up is. A 0.45/0.44 ACT "win" is a coin flip, not a verdict.
+        self.p_act = float(kw.get("p_act") or 0.0)
+        self.p_ask = float(kw.get("p_ask") or 0.0)
+        self.margin = float(kw.get("margin") or 0.0)
+        # Autonomy six. All 0–1 except emotion (0–3 like deadline).
+        self.money = float(kw.get("money") or 0.0)
+        self.commitment = float(kw.get("commitment") or 0.0)
+        self.emotion = float(kw.get("emotion") or 0.0)
+        self.knows_user = float(kw.get("knows_user") or 0.0)
+        self.thread_continuation = str(kw.get("thread_continuation") or "new")
+        self.reply_shape = str(kw.get("reply_shape") or "full")
+        self.deadline_p3 = float(kw.get("deadline_p3") or 0.0)
+        # Set by interpret(): may this verdict endorse an unattended send?
+        self.auto_ok = bool(kw.get("auto_ok", False))
 
     @property
     def is_vip(self) -> bool:
@@ -121,7 +177,9 @@ class JevVerdict:
 
     @property
     def is_urgent(self) -> bool:
-        return self.deadline >= 2
+        # The distribution knows more than the point estimate: a 1.8 with
+        # half its mass on "act now" is more urgent than a flat 2.0.
+        return self.deadline >= 2 or self.deadline_p3 >= 0.5
 
     @property
     def flags(self) -> list[str]:
@@ -133,6 +191,11 @@ class JevVerdict:
             out.append("urgent")
         return out
 
+    @property
+    def confident_auto(self) -> bool:
+        """May this verdict endorse an unattended send by itself?"""
+        return self.auto_ok
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict, "confidence": self.confidence,
@@ -140,6 +203,12 @@ class JevVerdict:
             "is_cold": self.is_cold, "needs_reply": self.needs_reply,
             "deadline": self.deadline, "importance": self.importance,
             "draft_tier": self.draft_tier, "reason": self.reason,
+            "p_act": self.p_act, "p_ask": self.p_ask, "margin": self.margin,
+            "money": self.money, "commitment": self.commitment,
+            "emotion": self.emotion, "knows_user": self.knows_user,
+            "thread_continuation": self.thread_continuation,
+            "reply_shape": self.reply_shape,
+            "deadline_p3": self.deadline_p3, "auto_ok": self.auto_ok,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -164,15 +233,35 @@ def interpret(resp: dict, cfg) -> JevVerdict:
       * low confidence is ASK
       * a strong needs-human signal is ASK whatever the action said
       * a genuinely sensitive message is ASK even at high confidence
+      * a coin-flip ACT (thin margin, strong ASK minority) is ASK — a
+        0.45/0.44 "win" is not a verdict, and acting on it is how agents send
+        mail the user then has to apologise for
+      * money, commitment or real emotion on an ACT is ASK
       * FILE is only honoured when nothing wants the human
     """
     a = (resp or {}).get("answers") or {}
     action = a.get("action") or {}
     verdict = str(action.get("choice") or ASK).upper()
     conf = _as_float(action.get("confidence"))
+    probs = action.get("probabilities") or {}
+    p_act = _as_float(probs.get("ACT", conf if verdict == ACT else 0.0))
+    p_ask = _as_float(probs.get("ASK", conf if verdict == ASK else 0.0))
+    ordered = sorted((_as_float(x) for x in probs.values()), reverse=True)
+    margin = (ordered[0] - ordered[1]) if len(ordered) > 1 else conf
     needs = _as_float((a.get("needs_user") or {}).get("noul"))
     sens = _as_float((a.get("sensitivity") or {}).get("score"))
     cold = _as_float((a.get("is_cold") or {}).get("noul"))
+    deadline = a.get("deadline") or {}
+    d_probs = deadline.get("probabilities") or {}
+    money = _as_float((a.get("money_involved") or {}).get("noul"))
+    commitment = _as_float((a.get("commitment") or {}).get("noul"))
+    emotion = _as_float((a.get("emotion_heat") or {}).get("score"))
+    tier = str((a.get("draft_tier") or {}).get("choice") or "flagship")
+    shape = str((a.get("reply_shape") or {}).get("choice") or "full")
+    if shape == "short" and tier == "flagship":
+        # A two-sentence reply does not need the best model and the full
+        # voice pass. Downgrading here is where the flagship savings come from.
+        tier = "cheap"
 
     v = JevVerdict(
         verdict=verdict if verdict in (ACT, ASK, FILE) else ASK,
@@ -181,9 +270,15 @@ def interpret(resp: dict, cfg) -> JevVerdict:
         sensitivity=sens,
         is_cold=cold,
         needs_reply=_as_float((a.get("needs_reply") or {}).get("noul")),
-        deadline=_as_float((a.get("deadline") or {}).get("score")),
+        deadline=_as_float(deadline.get("score")),
         importance=str((a.get("importance") or {}).get("choice") or "normal"),
-        draft_tier=str((a.get("draft_tier") or {}).get("choice") or "flagship"),
+        draft_tier=tier,
+        p_act=p_act, p_ask=p_ask, margin=margin,
+        money=money, commitment=commitment, emotion=emotion,
+        knows_user=_as_float((a.get("knows_user") or {}).get("noul")),
+        thread_continuation=str((a.get("thread_continuation") or {}).get("choice") or "new"),
+        reply_shape=shape,
+        deadline_p3=_as_float(d_probs.get("3")),
         raw=(resp or {}).get("usage") or {},
     )
 
@@ -203,10 +298,45 @@ def interpret(resp: dict, cfg) -> JevVerdict:
         v.verdict = ASK
         v.reason = f"sensitivity {sens:.0f}/3"
         return v
+    if v.verdict == ACT and p_ask >= cfg.jev.ask_prob_floor:
+        # A strong ASK minority means the judgment itself is contested.
+        # Acting on a contested judgment is guessing with extra steps.
+        v.verdict = ASK
+        v.reason = f"contested judgment (P(ask) {p_ask:.2f})"
+        return v
+    if v.verdict == ACT and margin < cfg.jev.min_margin:
+        v.verdict = ASK
+        v.reason = f"coin-flip verdict (margin {margin:.2f})"
+        return v
+    if v.verdict == ACT and money >= 0.5:
+        v.verdict = ASK
+        v.reason = f"money involved ({money:.2f})"
+        return v
+    if v.verdict == ACT and commitment >= 0.5:
+        v.verdict = ASK
+        v.reason = f"reply would commit you ({commitment:.2f})"
+        return v
+    if v.verdict != FILE and emotion >= 2:
+        v.verdict = ASK
+        v.reason = f"emotionally loaded ({emotion:.0f}/3)"
+        return v
     if v.verdict == FILE and needs > cfg.jev.file_needs_cut:
         v.verdict = ASK
         v.reason = f"filing would drop something the human wants ({needs:.2f})"
         return v
+    # The autonomy endorsement. Consequence is the bar, not familiarity:
+    # high-margin ACT, nothing financial, social or emotional load-bearing.
+    # Guards still enforce injection, escalation, attachments and the
+    # new-thread gate on top — this opens the contact-standing gate only.
+    v.auto_ok = (
+        v.verdict == ACT
+        and p_act >= cfg.jev.act_p
+        and margin >= cfg.jev.auto_margin
+        and sens < 1
+        and cold < 0.5
+        and money < 0.5
+        and commitment < 0.5
+    )
     if not v.reason:
         v.reason = f"jev {v.verdict.lower()} at {conf:.2f}"
     return v

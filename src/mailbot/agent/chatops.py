@@ -241,7 +241,11 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         parts = body.split()
         tuning = {"conf": ("JEV_MIN_CONFIDENCE", "min_confidence"),
                   "needs": ("JEV_NEEDS_CUT", "needs_cut"),
-                  "file": ("JEV_FILE_NEEDS_CUT", "file_needs_cut")}
+                  "file": ("JEV_FILE_NEEDS_CUT", "file_needs_cut"),
+                  "ask": ("JEV_ASK_P", "ask_prob_floor"),
+                  "margin": ("JEV_MARGIN", "min_margin"),
+                  "act": ("JEV_ACT_P", "act_p"),
+                  "automargin": ("JEV_AUTO_MARGIN", "auto_margin")}
         if len(parts) >= 2 and parts[0] in tuning:
             env, attr = tuning[parts[0]]
             try:
@@ -265,6 +269,9 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             "",
             f"thresholds: conf ≥ {j.min_confidence} · needs > {j.needs_cut} · "
             f"file-needs > {j.file_needs_cut} · sensitivity ≥ 2 → ASK",
+            f"margins: P(ask) ≥ {j.ask_prob_floor} → ASK · "
+            f"margin < {j.min_margin} → ASK · "
+            f"auto: P(act) ≥ {j.act_p} + margin ≥ {j.auto_margin}",
         ]
         if not jev_mod.enabled(cfg):
             out += ["", "Jev is off, so every message reaches the flagship "
@@ -275,7 +282,8 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
                 "ORDER BY id DESC LIMIT 5").fetchall()
         out += ["", "*last verdicts*"]
         out += [f"  {r['ts'][:19]}  {r['detail']}" for r in rows] or ["  none yet"]
-        out += ["", "tune: /jev conf 0.7 · /jev needs 0.6 · /jev file 0.8"]
+        out += ["", "tune: /jev conf 0.7 · /jev ask 0.4 · /jev margin 0.2 · "
+                    "/jev act 0.85"]
         return "\n".join(out)
 
     # ----------------------------------------------------------------- brain

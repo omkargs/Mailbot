@@ -305,13 +305,18 @@ class ToolBox:
 
     def __init__(self, provider: MailProvider, cfg, run_id: int, notify=None,
                  allow_permission_change: bool = False,
-                 profile: dict[str, Any] | None = None):
+                 profile: dict[str, Any] | None = None,
+                 jev_by_id: dict[str, Any] | None = None):
         self.p = provider
         self.cfg = cfg
         self.run_id = run_id
         self.notify = notify
         self.allow_permission_change = allow_permission_change
         self.profile = profile
+        # Jev verdicts keyed by message id. A reply inherits the verdict of
+        # the message it answers, which is how a high-margin ACT opens the
+        # contact-standing gate for that reply — and nothing else.
+        self.jev_by_id: dict[str, Any] = jev_by_id or {}
         self.stats = {"triaged": 0, "drafted": 0, "sent": 0, "escalated": 0}
         self._label_cache: dict[str, str] = {}
 
@@ -374,6 +379,7 @@ class ToolBox:
             # standing decision here. SDK sessions set this True (see sdk.py).
             "direct_execute": False,
             "resolve": lambda addr: self._standing(addr, in_reply_to),
+            "jev_by_id": self.jev_by_id,
         }
 
     def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -649,6 +655,10 @@ class ToolBox:
         verdicts = []
         for addr in to_addrs:
             authorized, established, is_cold = self._standing(addr, in_reply_to)
+            from . import hooks as _hooks
+
+            jev_ok = _hooks.jev_endorsement(
+                {"jev_by_id": self.jev_by_id}, in_reply_to)
             verdict = guards.decide(
                 sender=addr, subject=subject, body=body, account=self.p.account,
                 cfg=self.cfg.agent, account_auto_send=self.p.auto_send,
@@ -656,6 +666,7 @@ class ToolBox:
                 attachments=bool(attachments),
                 is_reply_to_unknown=is_cold,
                 is_established_thread=established,
+                jev_confident_act=jev_ok,
             )
             verdicts.append((addr, verdict))
 

@@ -145,6 +145,11 @@ def run_once(
         # scope. This is the whole point of the two-brain split, and it is safe
         # only because ASK is the fail-closed direction — a Jev failure lands
         # here too, so the worst case is a held message, never a lost one.
+        #
+        # Replies inherit their message's verdict: a high-margin ACT opens the
+        # contact-standing gate for that reply through the executor. The box
+        # carries the map so the tool layer can look it up by in_reply_to.
+        box.jev_by_id = {m["id"]: m["_jev"] for m in pending if "_jev" in m}
         pending, held = _hold_jev_asks(pending, box, account)
         if not pending:
             db.finish_run(run_id, triaged=box.stats["triaged"],
@@ -179,7 +184,7 @@ def run_once(
                 # Jev's extra signals are context, not instructions. The
                 # flagship still decides the reply; this tells it how much care
                 # the reply deserves and who it is going to.
-                bits = [f"jev={v.verdict} ({v.confidence:.2f})"]
+                bits = [f"jev={v.verdict} ({v.confidence:.2f}, margin {v.margin:.2f})"]
                 if v.importance != "normal":
                     bits.append(f"importance={v.importance}")
                 if v.deadline:
@@ -188,6 +193,15 @@ def run_once(
                     bits.append("they are waiting on a reply")
                 if v.draft_tier:
                     bits.append(f"draft with {v.draft_tier} care")
+                if v.reply_shape == "short":
+                    bits.append("a sentence or two closes it — do not write an essay")
+                if v.money >= 0.5 or v.commitment >= 0.5:
+                    bits.append("stakes: money or a commitment is involved — escalate, do not send")
+                if v.emotion >= 2:
+                    bits.append("emotionally loaded — escalate, do not send")
+                if v.auto_ok:
+                    bits.append("standing: routine and consequence-free, "
+                                "send_message may go out unattended")
                 ctx.append("; ".join(bits))
                 reg = brain_style.register_for(m.get("sender", ""))
                 if reg:
@@ -342,7 +356,8 @@ def _hold_jev_asks(
             continue
         question = (
             f"{m.get('sender', '')} — {m.get('subject', '') or '(no subject)'}"
-            f"{_card_flags(m)}: {v.reason}"
+            f"{_card_flags(m)}: {v.reason} (jev {v.verdict} "
+            f"{v.confidence:.2f}, margin {v.margin:.2f})"
         )
         if not db.claim_surfaced(account, m["id"], "ask", v.reason):
             # Already asked. The user knows; asking again is the noise this
@@ -548,11 +563,21 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
             notify(f"{tag} {head}{body}" if tag else f"{head}{body}")
         elif not st.get("sent") and not st.get("drafted") and summary:
             # Only chatter when the agent judged something worth saying —
-            # or filed something worth knowing about. Filed-mail reports
-            # always go out; silent archiving is how mail disappears.
+            # or filed something worth knowing about. Filed-mail reports go
+            # out once a day, not once a scan: silent archiving is how mail
+            # disappears, but five identical "filed 3 newsletters" in a day
+            # is how operators mute the channel and miss the sixth, real one.
             low = summary.lower()
             if len(summary) > 20 and (low.startswith("filed ") or
                                       not low.startswith(("no ", "nothing "))):
+                if low.startswith("filed "):
+                    from datetime import date as _date
+
+                    if not db.claim_surfaced(
+                            provider.account,
+                            f"filed-{_date.today().isoformat()}",
+                            "filed", summary[:200]):
+                        return res
                 notify(f"{tag} {summary}" if tag else summary)
     return res
 
