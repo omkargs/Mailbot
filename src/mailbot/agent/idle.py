@@ -53,30 +53,82 @@ def _idle_ack(im: imaplib.IMAP4_SSL) -> float:
     return IDLE_ACK_SEC
 
 
+def classify_failure(exc: Exception) -> str:
+    """'auth' when the credentials themselves are rejected, 'transient' for
+    everything else. An auth failure never heals by retrying — only a new
+    app password fixes it — so it gets one loud notice and then silence,
+    while transient drops keep their normal reconnect chatter."""
+    text = f"{exc}".upper()
+    if "AUTHENTICATIONFAILED" in text or "INVALID CREDENTIALS" in text:
+        return "auth"
+    return "transient"
+
+
 class IdleListener(threading.Thread):
     """Watches INBOX over IMAP IDLE and calls `on_new` when mail arrives."""
 
-    def __init__(self, cfg: GoogleConfig, on_new: Callable[[], None], password: str):
+    def __init__(self, cfg: GoogleConfig, on_new: Callable[[], None], password: str,
+                 notify: Callable[..., None] | None = None):
         super().__init__(name="imap-idle", daemon=True)
         self.cfg = cfg
         self.on_new = on_new
         self.password = password
+        self.notify = notify
         self._stop = threading.Event()
         self.connected = False
         self.last_event = 0.0
+        self.auth_failed = False
+        self._told_auth_dead = False
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _current_password(self) -> str:
+        """Re-read the app password every attempt. `setup --step push` writes
+        a fresh one while the daemon runs — picking it up here heals push
+        without a restart, which is the whole point of retrying at all."""
+        try:
+            from ..setup import read_secrets
+
+            return read_secrets().get("GOOGLE_IMAP_PASSWORD", "") or self.password
+        except Exception:
+            return self.password
 
     def _connect(self) -> imaplib.IMAP4_SSL | None:
         try:
             ctx = ssl.create_default_context()
             im = imaplib.IMAP4_SSL(self.cfg.imap_host, self.cfg.imap_port, ssl_context=ctx)
-            im.login(self.cfg.account, self.password)
+            im.login(self.cfg.account, self._current_password())
             im.select("INBOX")
+            if self.auth_failed:
+                # Healed by a fresh password mid-run. Say so once, out loud.
+                self.auth_failed = False
+                self._told_auth_dead = False
+                log.info("push healed — IDLE connected again")
+                if self.notify:
+                    try:
+                        self.notify("Push is back — new mail wakes me again.")
+                    except Exception:
+                        pass
             return im
         except Exception as e:
-            log.warning("idle connect failed: %s: %s", type(e).__name__, e)
+            if classify_failure(e) == "auth":
+                self.auth_failed = True
+                if not self._told_auth_dead:
+                    self._told_auth_dead = True
+                    log.warning("idle auth rejected — app password is dead")
+                    if self.notify:
+                        try:
+                            self.notify(
+                                "Push is down: Gmail rejected the app password, so I "
+                                "check mail every minute instead of instantly. "
+                                "Make a fresh one (Google Account → Security → "
+                                "App passwords) and run `mail-agent setup --step push` — "
+                                "I'll pick it up without a restart.")
+                        except Exception:
+                            pass
+            else:
+                log.warning("idle connect failed: %s: %s", type(e).__name__, e)
             return None
 
     def run(self) -> None:

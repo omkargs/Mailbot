@@ -53,6 +53,9 @@ class HealthState:
     def ok(self) -> bool:
         return self.consecutive_failures < MAX_CONSECUTIVE_FAILURES
 
+    idle_connected: bool = False
+    idle_note: str = ""
+
     def snapshot(self) -> dict[str, Any]:
         from datetime import datetime, timezone
 
@@ -69,6 +72,8 @@ class HealthState:
             "last_scan_ago_sec": int(time.time() - self.last_scan) if self.last_scan else None,
             "last_success_ago_sec": int(time.time() - self.last_success) if self.last_success else None,
             "auth_dead": sorted(self.auth_dead),
+            "idle_connected": self.idle_connected,
+            "idle_note": self.idle_note,
         }
 
 
@@ -94,6 +99,7 @@ class Supervisor:
         self.tick_fn = tick_fn
         self.notify = notify
         self.health = HealthState()
+        self.idle = None  # IdleListener, when push is configured (see cli.cmd_daemon)
         self._stop = threading.Event()
         # Set by IMAP IDLE when new mail arrives. The loop's sleep returns
         # early on it, turning a 5-minute poll into sub-second detection.
@@ -161,6 +167,15 @@ class Supervisor:
         try:
             d = Path(os.environ.get("MAIL_AGENT_STATE", str(DATA_DIR)))
             d.mkdir(parents=True, exist_ok=True)
+            idle = self.idle
+            if idle is not None:
+                self.health.idle_connected = bool(idle.connected)
+                self.health.idle_note = (
+                    "" if idle.connected
+                    else ("app password rejected — polling, not push"
+                          if idle.auth_failed else "reconnecting"))
+            else:
+                self.health.idle_note = "not configured — polling"
             snap = self.health.snapshot()
             snap["pid"] = os.getpid()
             (d / "daemon.json").write_text(json.dumps(snap, indent=2))

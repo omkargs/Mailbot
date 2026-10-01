@@ -392,8 +392,10 @@ def cmd_daemon(args, cfg):
             # sup.wake is an Event; on_new is called as a function, so hand it
             # the bound method. Passing the Event itself raised TypeError on
             # every push, so mail was detected and then never processed.
-            idle = IdleListener(cfg.google, sup.wake.set, cfg.google.imap_password)
+            idle = IdleListener(cfg.google, sup.wake.set, cfg.google.imap_password,
+                                notify=notifier.send)
             idle.start()
+            sup.idle = idle
             log.info("IMAP IDLE active — push detection, zero polling cost")
         except Exception as e:
             log.warning("IDLE unavailable, using interval polling: %s", type(e).__name__)
@@ -445,6 +447,10 @@ def cmd_health(args, cfg):
             st = _json.loads(pf.read_text())
             print(f"  pid: {st.get('pid')}  cycles: {st.get('cycles')}  "
                   f"uptime: {st.get('uptime_sec', 0) // 60}m")
+            if st.get("idle_connected"):
+                print("  push: IDLE connected — new mail wakes the agent")
+            elif st.get("idle_note"):
+                print(f"  push: {st['idle_note']}")
         except Exception:
             pass
     if last_err:
