@@ -277,24 +277,15 @@ def test_claim_surfaced_once_then_quiet():
     assert db.claim_surfaced("google", "mx1", "ask", "again") is True
 
 
-def test_hold_jev_asks_escalates_once():
+def test_hold_jev_asks_escalates_once(provider):
     from mailbot.agent import jev
     from mailbot.agent.runner import _hold_jev_asks
+    from mailbot.agent.tools import ToolBox
 
     cfg = _cfg()
     sent = []
-
-    class Box:
-        stats = {"triaged": 0, "drafted": 0, "sent": 0, "escalated": 0}
-
-        def _tagged(self, t):
-            return t
-
-        def _notify(self, t, approval_id=""):
-            sent.append(t)
-            return "mid1"
-
-    box = Box()
+    box = ToolBox(provider, cfg, run_id=1,
+                  notify=lambda t, approval_id="": sent.append(t) or "mid1")
     m = {"id": "mh1", "sender": "vip@corp.com", "subject": "contract now",
          "body": "please review the contract attached here today"}
     m["_jev"] = jev.interpret(_ans("ASK", 0.9, deadline=3, importance="vip"), cfg)
@@ -305,7 +296,8 @@ def test_hold_jev_asks_escalates_once():
     # Second cycle: the claim is spent, no second card. Notify that failed
     # would have released the claim; a delivered one stays silent.
     sent.clear()
-    box2 = Box()
+    box2 = ToolBox(provider, cfg, run_id=2,
+                   notify=lambda t, approval_id="": sent.append(t) or "mid1")
     m2 = dict(m)
     m2["_jev"] = m["_jev"]
     rest2, held2 = _hold_jev_asks([m2], box2, "google")
@@ -508,6 +500,66 @@ def test_unendorsed_stranger_still_queues(provider, cfg):
         "in_reply_to": "m1"})
     assert out.get("mode") == "queued"
     assert provider.sent == [] and len(db.pending_approvals()) == 1
+
+
+def test_filed_mail_gets_newsletter_label(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("FILE", 0.95), c))
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(sender="news@list.com", subject="digest one",
+                         body="hello friend, here is the weekly news", date=now)
+    R.scan(provider, cfg, notify=lambda t, approval_id="": None)
+    got = [(a["message_id"], a["label_id"]) for a in provider.applied]
+    assert got, "filing must label as well as archive"
+    assert any("ewsletter" in lid for _, lid in got)
+
+
+def test_urgent_ask_gets_urgent_label(provider, cfg):
+    from mailbot.agent import jev
+    from mailbot.agent.runner import _hold_jev_asks
+    from mailbot.agent.tools import ToolBox
+
+    box = ToolBox(provider, cfg, run_id=1)
+    m = {"id": "mu1", "sender": "vip@corp.com", "subject": "contract now",
+         "body": "please review the contract attached here today"}
+    m["_jev"] = jev.interpret(_ans("ASK", 0.9, deadline=3, importance="vip"), _cfg())
+    _hold_jev_asks([m], box, "google")
+    assert any("rgent" in a["label_id"] for a in provider.applied)
+
+
+def test_label_failure_never_blocks_filing(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("FILE", 0.95), c))
+    monkeypatch.setattr(provider, "apply_label",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("labels down")))
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(sender="news@list.com", subject="digest one",
+                         body="hello friend, here is the weekly news", date=now)
+    res = R.scan(provider, cfg, notify=lambda t, approval_id="": None)
+    assert res.get("status") == "ok"
+
+
+def test_ensure_labels_creates_missing_set(provider, cfg):
+    import mailbot.agent.runner as R
+    from mailbot.agent.tools import ToolBox
+
+    provider.labels = {}
+    box = ToolBox(provider, cfg, run_id=1)
+    R.ensure_labels(provider, box)
+    names = {v for v in provider.labels.values()} | set(provider.labels)
+    assert "Newsletter" in provider.labels.values() or "Newsletter" in provider.labels
 
 
 def test_filed_reported_once_per_day(provider, cfg, monkeypatch):

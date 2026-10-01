@@ -128,6 +128,12 @@ def prune(messages: list[dict[str, Any]], verdicts: dict[str, dict[str, str]],
                 db.log_action("archive", provider.account, m["id"],
                               detail="triage:ignore")
                 db.mark_processed(m["id"], getattr(provider, "account", ""))
+                try:
+                    from .runner import label_managed as _label
+
+                    _label(provider, box, m["id"], "Newsletter")
+                except Exception:
+                    pass
                 archived += 1
                 continue
         except Exception as e:

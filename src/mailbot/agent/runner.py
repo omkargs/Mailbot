@@ -335,6 +335,46 @@ def run_once(
             pass
 
 
+# The agent's own label set. Created on first scan, reused forever after.
+# Organizing first is deliberate: a mailbox where newsletters and urgent mail
+# are visually distinct is one the operator can trust at a glance — and
+# labels are reversible, so this is triage, not action.
+MANAGED_LABELS = ("Newsletter", "Urgent")
+
+_label_cache: dict[tuple[str, str], str] = {}
+
+
+def ensure_labels(provider, box) -> None:
+    """Create the managed labels if they are missing. Best-effort and cached:
+    one list call per scan, creates only what is absent, and a failure here
+    never blocks mail — labels are organization, not safety."""
+    try:
+        existing = {str(l.get("name", "")) for l in provider.list_labels()}
+    except Exception as e:
+        log.debug("label listing failed: %s", type(e).__name__)
+        return
+    for name in MANAGED_LABELS:
+        if name in existing:
+            continue
+        try:
+            _label_cache[(provider.account, name)] = box._label_id(name)
+        except Exception as e:
+            log.debug("label create failed for %s: %s", name, type(e).__name__)
+
+
+def label_managed(provider, box, message_id: str, name: str) -> bool:
+    """Apply one managed label. Returns False (never raises) on any failure."""
+    try:
+        key = (provider.account, name)
+        if key not in _label_cache:
+            _label_cache[key] = box._label_id(name)
+        return bool(provider.apply_label(message_id, _label_cache[key], add=True))
+    except Exception as e:
+        log.debug("label %s failed for %s: %s", name, message_id, type(e).__name__)
+        _label_cache.pop((provider.account, name), None)
+        return False
+
+
 def _card_flags(m: dict[str, Any]) -> str:
     """Jev's VIP / urgent annotations, for the top of an operator card."""
     v = m.get("_jev")
@@ -370,6 +410,8 @@ def _hold_jev_asks(
             # whole mechanism exists to remove.
             rest.append(m)
             continue
+        if v.is_urgent:
+            label_managed(box.p, box, m["id"], "Urgent")
         mid = box._notify(box._tagged(f"Needs you: {question}"))
         if mid is None and box.notify:
             db.release_surfaced(account, m["id"], "ask")
@@ -542,6 +584,14 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
     new = fetch_new(provider, cfg=cfg)
     if not new:
         return {"status": "empty", "new": 0}
+    # Organize first: the managed labels exist before anything is filed or
+    # flagged, so every verdict lands in an already-tidy mailbox.
+    try:
+        from .tools import ToolBox
+
+        ensure_labels(provider, ToolBox(provider, cfg, run_id=0, notify=notify))
+    except Exception as e:
+        log.debug("ensure_labels failed: %s", type(e).__name__)
     if first_run_window(provider):
         log.info("first run: %d message(s) from the last %d day(s). "
                  "Older mail is untouched — change AGENT_FIRST_RUN_DAYS to "

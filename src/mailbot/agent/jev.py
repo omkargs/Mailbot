@@ -437,6 +437,14 @@ def prune(
                 db.log_action("archive", provider.account, m["id"],
                               detail=f"jev:file ({v.confidence:.2f})")
                 db.mark_processed(m["id"], getattr(provider, "account", ""))
+                try:
+                    from .runner import label_managed as _label
+
+                    if _label(provider, box, m["id"], "Newsletter"):
+                        db.log_action("label", provider.account, m["id"],
+                                      detail="Newsletter")
+                except Exception:
+                    pass
                 archived += 1
                 continue
         except Exception as e:

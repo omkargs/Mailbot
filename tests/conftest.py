@@ -78,6 +78,7 @@ class FakeProvider:
         self.labels: dict[str, str] = {"lbl_1": "Urgent"}
         self.events: list[dict] = []
         self.inbox: list[dict] = []
+        self.applied: list[dict] = []
         self.get_messages_calls: list[list[str]] = []
         self._next = 1
         MailProvider.register(FakeProvider)
@@ -125,7 +126,9 @@ class FakeProvider:
         return [m for m in self.inbox if m["thread_id"] == thread_id]
     def search(self, query="", sender="", subject="", since="", limit=25, full=False):
         return self.inbox[:limit]
-    def apply_label(self, message_id, label_id, add=True): return True
+    def apply_label(self, message_id, label_id, add=True):
+        self.applied.append({"message_id": message_id, "label_id": label_id, "add": add})
+        return True
     def mark_read(self, message_id, read=True): return True
     def archive(self, message_id): return True
     def create_label(self, name): return self.labels.setdefault(name, f"lbl_{name}")
