@@ -221,7 +221,12 @@ class TelegramNotifier(BaseNotifier):
                         out.append({"action": act, "approval_id": parts[1]})
                     handled = True
             if not handled:
-                out.append({"action": "chat", "text": text, "update_id": upd["update_id"]})
+                # The chat key scopes conversation memory. Today every update
+                # comes from the owner chat (anything else was dropped above),
+                # but the key is explicit so a second chat can never inherit
+                # this one's pronouns.
+                out.append({"action": "chat", "text": text, "update_id": upd["update_id"],
+                            "chat": f"telegram:{chat.get('id', '')}" if chat.get("id") else "owner"})
         return out
 
     def interactive(self) -> bool:
@@ -350,7 +355,8 @@ class ApprovalListener:
                 if uid is not None and self._mark(uid):
                     continue
                 try:
-                    reply = handle_text(d.get("text", ""), self.cfg, self.providers, ops)
+                    reply = handle_text(d.get("text", ""), self.cfg, self.providers, ops,
+                                        chat=d.get("chat", "owner"))
                 except Exception as e:
                     log.error("chat command failed: %s: %s", type(e).__name__, e)
                     reply = f"Something went wrong: {type(e).__name__}. Check the logs."

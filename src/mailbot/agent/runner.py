@@ -22,6 +22,7 @@ from ..config import Config
 from ..providers.base import Attachment, MailProvider
 from ..storage import db
 from . import guards
+from . import jev
 from . import triage
 from .client import build_client, guarded_call, handle_refusal, usage_to_dict
 from .tools import TOOLS, ToolBox, build_system_prompt
@@ -107,10 +108,23 @@ def run_once(
             db.finish_run(run_id, status="ok")
             return {"status": "empty", "run_id": run_id}
 
-        # Cheap triage pass first: a small model sorts, IGNOREs get archived
-        # here, and the flagship only ever sees what matters. Any failure falls
-        # back to the full flagship pass — mail is never dropped to save money.
-        if triage.wanted(cfg):
+        # Two brains. Jev is the cheap one: System-One sorts each message in
+        # milliseconds for cents, and the flagship only ever sees what deserves
+        # a real reply. If Jev is unconfigured or errors, the small triage model
+        # is the fallback; if that fails too, the full flagship pass runs. Mail
+        # is never dropped to save money.
+        if jev.enabled(cfg):
+            try:
+                verdicts = {m["id"]: jev.decide(m, cfg) for m in pending[:12]}
+                for v in verdicts.values():
+                    db.log_action("jev", account, v.verdict,
+                                  detail=f"conf={v.confidence:.2f} {v.reason}",
+                                  actor="system")
+                pending, _archived = jev.prune(pending, verdicts, cfg, provider, box)
+            except Exception as e:
+                log.warning("jev pass failed (%s); falling back", type(e).__name__)
+                pending = [m for m in pending if "_jev" not in m]
+        elif triage.wanted(cfg):
             try:
                 verdicts = triage.classify(pending[:12], cfg)
                 pending, _archived = triage.prune(pending, verdicts, cfg, provider, box)
@@ -122,6 +136,27 @@ def run_once(
             n = box.stats["triaged"]
             return {"status": "ok", "run_id": run_id,
                     "summary": f"Filed {n} newsletter(s) — nothing needs you.",
+                    "stats": box.stats,
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_read": 0, "cache_write": 0}}
+
+        # Jev said ASK: a human is needed. Escalate here rather than paying the
+        # flagship to read a message the cheap decider already ruled out of
+        # scope. This is the whole point of the two-brain split, and it is safe
+        # only because ASK is the fail-closed direction — a Jev failure lands
+        # here too, so the worst case is a held message, never a lost one.
+        #
+        # Replies inherit their message's verdict: a high-margin ACT opens the
+        # contact-standing gate for that reply through the executor. The box
+        # carries the map so the tool layer can look it up by in_reply_to.
+        box.jev_by_id = {m["id"]: m["_jev"] for m in pending if "_jev" in m}
+        pending, held = _hold_jev_asks(pending, box, account)
+        if not pending:
+            db.finish_run(run_id, triaged=box.stats["triaged"],
+                          escalated=box.stats["escalated"],
+                          input_tokens=0, output_tokens=0, status="ok")
+            return {"status": "ok", "run_id": run_id,
+                    "summary": f"{box.stats['escalated']} thing(s) need you.",
                     "stats": box.stats,
                     "usage": {"input_tokens": 0, "output_tokens": 0,
                               "cache_read": 0, "cache_write": 0}}
@@ -144,6 +179,33 @@ def run_once(
                 f"subject: {m.get('subject', '')[:120]}", "headers"))
             if "_triage" in m:
                 ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
+            v = m.get("_jev")
+            if v is not None:
+                # Jev's extra signals are context, not instructions. The
+                # flagship still decides the reply; this tells it how much care
+                # the reply deserves and who it is going to.
+                bits = [f"jev={v.verdict} ({v.confidence:.2f}, margin {v.margin:.2f})"]
+                if v.importance != "normal":
+                    bits.append(f"importance={v.importance}")
+                if v.deadline:
+                    bits.append(f"deadline={v.deadline:.0f}/3")
+                if v.needs_reply:
+                    bits.append("they are waiting on a reply")
+                if v.draft_tier:
+                    bits.append(f"draft with {v.draft_tier} care")
+                if v.reply_shape == "short":
+                    bits.append("a sentence or two closes it — do not write an essay")
+                if v.money >= 0.5 or v.commitment >= 0.5:
+                    bits.append("stakes: money or a commitment is involved — escalate, do not send")
+                if v.emotion >= 2:
+                    bits.append("emotionally loaded — escalate, do not send")
+                if v.auto_ok:
+                    bits.append("standing: routine and consequence-free, "
+                                "send_message may go out unattended")
+                ctx.append("; ".join(bits))
+                reg = brain_style.register_for(m.get("sender", ""))
+                if reg:
+                    ctx.append(f"register with this person: {reg}")
             if body:
                 ctx.append(guards.fence(body[:1500], "body"))
             else:
@@ -217,6 +279,12 @@ def run_once(
             log.warning("agent hit MAX_ITERATIONS (%d); messages left unprocessed", MAX_ITERATIONS)
             final_text = "stopped: iteration limit reached, mail left for the next run"
 
+        # The closing summary is model-written, so it passes through the same
+        # identity wash as chat replies. A summary that introduces itself as
+        # the router's model undoes the whole "your agent" framing.
+        from .ask import sanitize_identity
+
+        final_text = sanitize_identity(final_text)
         if completed:
             for m in pending:
                 db.mark_processed(m["id"], account)
@@ -265,6 +333,50 @@ def run_once(
                               error="run aborted before completion")
         except Exception:
             pass
+
+
+def _card_flags(m: dict[str, Any]) -> str:
+    """Jev's VIP / urgent annotations, for the top of an operator card."""
+    v = m.get("_jev")
+    flags = getattr(v, "flags", None) or []
+    return f" [{' · '.join(flags)}]" if flags else ""
+
+
+def _hold_jev_asks(
+    pending: list[dict[str, Any]],
+    box,
+    account: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Escalate everything Jev marked ASK. Returns (rest, held_count).
+
+    One card per message, ever. The dedupe claim is taken BEFORE the notify,
+    and released if the notify itself failed, so a channel outage does not
+    permanently silence a message the user never saw.
+    """
+    rest: list[dict[str, Any]] = []
+    held = 0
+    for m in pending:
+        v = m.get("_jev")
+        if v is None or v.verdict != jev.ASK:
+            rest.append(m)
+            continue
+        question = (
+            f"{m.get('sender', '')} — {m.get('subject', '') or '(no subject)'}"
+            f"{_card_flags(m)}: {v.reason} (jev {v.verdict} "
+            f"{v.confidence:.2f}, margin {v.margin:.2f})"
+        )
+        if not db.claim_surfaced(account, m["id"], "ask", v.reason):
+            # Already asked. The user knows; asking again is the noise this
+            # whole mechanism exists to remove.
+            rest.append(m)
+            continue
+        mid = box._notify(box._tagged(f"Needs you: {question}"))
+        if mid is None and box.notify:
+            db.release_surfaced(account, m["id"], "ask")
+        else:
+            box.stats["escalated"] += 1
+            held += 1
+    return rest, held
 
 
 def fetch_new(provider: MailProvider, limit: int = 0, cfg: Config | None = None) -> list[dict[str, Any]]:
@@ -441,9 +553,24 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
     if res.get("status") == "ok":
         advance_cursor(provider, [m["id"] for m in new])
 
+    # LEARN runs once per scan, not once per send: diffing abandoned drafts
+    # against the user's own sent replies costs a thread fetch each, so it is
+    # bounded — and it must never break the scan that hosts it.
+    voice_tip = None
+    try:
+        harvest_voice_samples(provider.account, provider)
+        voice_tip = brain_style.maybe_propose_voice(provider.account)
+    except Exception as e:
+        log.debug("learn pass failed: %s", type(e).__name__)
+
     # Report the outcome. Sends already notified themselves; without this the
     # operator hears nothing at all when the agent escalated something, which
     # is exactly the moment they most need to know.
+    if voice_tip and notify:
+        from ..profiles import header_for as _header_for
+
+        _tag = _header_for(profile, provider.address if hasattr(provider, "address") else "")
+        notify(f"{_tag} {voice_tip}" if _tag else voice_tip)
     if notify and res.get("status") == "ok":
         from ..profiles import header_for
 
@@ -457,11 +584,21 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
             notify(f"{tag} {head}{body}" if tag else f"{head}{body}")
         elif not st.get("sent") and not st.get("drafted") and summary:
             # Only chatter when the agent judged something worth saying —
-            # or filed something worth knowing about. Filed-mail reports
-            # always go out; silent archiving is how mail disappears.
+            # or filed something worth knowing about. Filed-mail reports go
+            # out once a day, not once a scan: silent archiving is how mail
+            # disappears, but five identical "filed 3 newsletters" in a day
+            # is how operators mute the channel and miss the sixth, real one.
             low = summary.lower()
             if len(summary) > 20 and (low.startswith("filed ") or
                                       not low.startswith(("no ", "nothing "))):
+                if low.startswith("filed "):
+                    from datetime import date as _date
+
+                    if not db.claim_surfaced(
+                            provider.account,
+                            f"filed-{_date.today().isoformat()}",
+                            "filed", summary[:200]):
+                        return res
                 notify(f"{tag} {summary}" if tag else summary)
     return res
 
@@ -488,6 +625,22 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
     payload = json.loads(row["payload"])
     db.resolve_approval(approval_id, "approved" if approved else "denied", by="user")
     kind = row["kind"]
+
+    # The approval is bound to the exact bytes queued. Anything that drifted
+    # between the card and this call — a mutated recipient, a swapped body —
+    # is something the user never approved, so it does not run. Approvals
+    # queued before hash binding carry no hash and are held for the same
+    # reason: unknown provenance is not provenance.
+    if approved and kind in ("send", "calendar_delete", "calendar_invite"):
+        if not _hash_matches(kind, payload):
+            db.resolve_approval(approval_id, "blocked", by="gate")
+            db.log_action("send_blocked", account, approval_id,
+                          actor="gate", approval_id=approval_id,
+                          detail="approval hash mismatch or missing — drift voids it")
+            if notify:
+                notify("Held: that approval no longer matches what was queued. "
+                       "Re-queue it from the current draft.")
+            return {"ok": False, "error": "blocked: approval drifted from what was queued"}
 
     if not approved:
         db.log_action("send_denied", account, payload.get("event_id") or ", ".join(payload.get("to", [])),
@@ -555,6 +708,13 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
                       detail=payload["subject"])
         if notify:
             notify(f"Sent: {payload['subject']}")
+        # LEARN, same as the auto path: this send is a confirmation sample,
+        # and twelve of them (or two days of them) earn a profile proposal.
+        record_send_confirmation(account, payload["to"], payload["subject"],
+                                 payload["body"], payload.get("in_reply_to", ""))
+        tip = brain_style.maybe_propose_voice(account)
+        if tip and notify:
+            notify(tip)
         # Approval learning: two approvals in a row earns a one-time
         # proposal — never silent auto-enable. Consent stays in chat.
         if notify:
@@ -571,28 +731,123 @@ def run_approval(account: str, provider: MailProvider, cfg: Config, approval_id:
     return {"ok": ok, "sent": ok}
 
 
-def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 40) -> int:
-    """Compare agent drafts against what was actually sent, so the voice learns."""
-    drafts = db.list_drafts(account, limit=limit)
+_HASH_TOOL = {
+    "send": "send_message",
+    "calendar_delete": "calendar_delete",
+    "calendar_invite": "calendar_invite",
+}
+
+
+def _hash_matches(kind: str, payload: dict[str, Any]) -> bool:
+    """Does this payload still match the hash it was queued with?"""
+    from . import guards as _guards
+
+    stored = payload.get("action_hash", "")
+    if not stored:
+        return False
+    body = {k: v for k, v in payload.items() if k != "action_hash"}
+    return _guards.action_hash(_HASH_TOOL[kind], body) == stored
+
+
+def record_send_confirmation(account: str, to_addrs: list[str], subject: str,
+                               body: str, in_reply_to: str = "") -> None:
+    """Log what just went out as a voice sample. The sent copy IS the draft
+    here, so the row is a confirmation — proof the current voice works, not a
+    correction. Corrections arrive via harvest, below. Never raises: learning
+    must not break sending."""
+    try:
+        for addr in to_addrs:
+            brain_style.record_voice_sample(
+                account, in_reply_to or "", addr, subject,
+                body, body, context="sent as drafted",
+            )
+    except Exception as e:
+        log.debug("voice confirmation failed: %s", type(e).__name__)
+
+
+def _draft_age_days(created_at: str) -> float | None:
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+    except (ValueError, TypeError):
+        return None
+
+
+def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 10) -> int:
+    """Diff abandoned drafts against what the user actually sent instead.
+
+    When the operator ignores a draft and writes their own reply, the thread
+    holds a sent message newer than the draft, from their own address, with
+    different bytes. That pair — what the agent proposed vs what the human
+    chose — is the strongest learning signal there is, and it only exists
+    here. Each draft is consumed once (marked harvested); drafts older than
+    7 days with no sent reply are retired without a sample.
+
+    Bounded and exception-safe: this runs inside the scan cycle, and learning
+    must never break mail.
+    """
+    try:
+        drafts = [d for d in db.list_drafts(account, limit=limit) if d.get("in_reply_to")]
+    except Exception:
+        return 0
     if not drafts:
         return 0
+    own = (getattr(provider, "address", "") or "").lower()
     learned = 0
     for d in drafts:
-        if not d.get("in_reply_to"):
-            continue
         try:
-            actual = provider.get_message(d["in_reply_to"])
+            orig = provider.get_message(d["in_reply_to"])
+            thread_id = (orig or {}).get("thread_id", "")
+            thread = provider.get_thread(thread_id) if thread_id else []
         except Exception:
             continue
-        if not actual:
+        sent_by_user = None
+        for t in thread:
+            labels = [str(x).upper() for x in (t.get("label_ids") or [])]
+            sender = str(t.get("sender") or "")
+            if "SENT" not in labels and (not own or own not in sender.lower()):
+                continue
+            if _is_newer(t.get("date", ""), d.get("created_at", "")):
+                sent_by_user = t
+                break
+        if sent_by_user and sent_by_user.get("body") and d.get("body"):
+            import re as _re
+
+            norm_a = _re.sub(r"\s+", " ", d["body"]).strip()
+            norm_b = _re.sub(r"\s+", " ", sent_by_user["body"]).strip()
+            if norm_a != norm_b:
+                # Edited: the user rewrote it. Record the correction.
+                row = brain_style.record_voice_sample(
+                    account, thread_id, d.get("to_addr", ""), d.get("subject", ""),
+                    d["body"], sent_by_user["body"],
+                    context=f"draft rewritten in thread {thread_id}",
+                )
+                if row:
+                    learned += 1
+            # Identical (or empty): the send-time confirmation already covered
+            # it, or there is nothing to learn. Either way, consume the draft.
+            db.mark_draft_harvested(d["id"], account)
             continue
-        # If the user edited and sent our draft, the thread contains a later
-        # message. We compare the draft against the sent copy when we can find it.
-        if actual.get("body") and d.get("body"):
-            row = brain_style.record_voice_sample(
-                account, d["in_reply_to"], d["to_addr"], d["subject"],
-                d["body"], actual["body"], context=d.get("in_reply_to", ""),
-            )
-            if row:
-                learned += 1
+        age = _draft_age_days(d.get("created_at", ""))
+        if age is not None and age > 7:
+            db.mark_draft_harvested(d["id"], account)
     return learned
+
+
+def _is_newer(date_str: str, created_at: str) -> bool:
+    """Is this message newer than the draft? Unparseable dates abstain —
+    a wrong comparison here fabricates a correction out of nothing."""
+    try:
+        from datetime import datetime, timezone
+
+        def _parse(v: str):
+            dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        return _parse(date_str) > _parse(created_at)
+    except (ValueError, TypeError):
+        return False

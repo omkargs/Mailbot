@@ -23,6 +23,10 @@ _tmp = tempfile.mkdtemp(prefix="mailagent-test-")
 os.environ["MAIL_AGENT_DB"] = str(Path(_tmp) / "test.db")
 os.environ["MAIL_AGENT_DATA_DIR"] = _tmp
 os.environ["MAIL_AGENT_CONFIG_DIR"] = str(Path(_tmp) / "config")
+# The voice profile lives in the repo's brain/ dir by default, which on a
+# real machine holds the user's actual profile. A test asserting "not learned
+# yet" must not read that file — isolate the brain like everything else.
+os.environ["MAIL_AGENT_BRAIN"] = str(Path(_tmp) / "brain")
 
 
 @pytest.fixture(autouse=True)
@@ -31,10 +35,20 @@ def clean_db():
     from mailbot import limits
 
     db.migrate()
+    # chat_history is created lazily by chatlog._ensure(); make sure it exists
+    # before wiping, or the first chat test errors on a missing table.
+    from mailbot.agent import chatlog as _chatlog
+
+    _chatlog._ensure()
+    # The voice log is a file, not a table — truncate it per test or LEARN
+    # samples leak across tests and every threshold test re-fires.
+    _vl = Path(_tmp) / "voice_log.jsonl"
+    if _vl.exists():
+        _vl.unlink()
     # Child tables first — drafts references runs, messages references accounts.
     for table in ("drafts", "approvals", "actions_log", "messages", "cursors",
                   "runs", "contacts", "skills", "labels", "usage_daily",
-                  "scheduled_jobs", "accounts"):
+                  "scheduled_jobs", "surfaced", "chat_history", "accounts"):
         with db.db() as c:
             c.execute(f"DELETE FROM {table}")
     # Spend limits are process-global so every thread shares one budget. Reset
@@ -146,4 +160,9 @@ def cfg():
     c.agent.daily_token_cap = 10_000_000
     # A dummy key so build_client does not refuse before the mock intercepts.
     c.router.api_key = "test-key-not-real"
+    # These tests exercise the flagship path, not the decider. Jev stays ON
+    # in production (it falls back to the router's own URL/key, which is how
+    # Bynara serves the `jev` model); here there is no network, so the suite
+    # says explicitly which brain it is testing. test_jev.py enables it.
+    c.jev.enabled = False
     return c

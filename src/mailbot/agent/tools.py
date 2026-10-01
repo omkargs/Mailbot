@@ -305,13 +305,18 @@ class ToolBox:
 
     def __init__(self, provider: MailProvider, cfg, run_id: int, notify=None,
                  allow_permission_change: bool = False,
-                 profile: dict[str, Any] | None = None):
+                 profile: dict[str, Any] | None = None,
+                 jev_by_id: dict[str, Any] | None = None):
         self.p = provider
         self.cfg = cfg
         self.run_id = run_id
         self.notify = notify
         self.allow_permission_change = allow_permission_change
         self.profile = profile
+        # Jev verdicts keyed by message id. A reply inherits the verdict of
+        # the message it answers, which is how a high-margin ACT opens the
+        # contact-standing gate for that reply — and nothing else.
+        self.jev_by_id: dict[str, Any] = jev_by_id or {}
         self.stats = {"triaged": 0, "drafted": 0, "sent": 0, "escalated": 0}
         self._label_cache: dict[str, str] = {}
 
@@ -336,15 +341,75 @@ class ToolBox:
             self._label_cache[name] = got
         return self._label_cache[name]
 
+    def _standing(self, addr: str, in_reply_to: str = "") -> tuple[bool, bool, bool]:
+        """(contact_authorized, established, is_cold) for one recipient.
+
+        Single implementation behind both the hook gate and the executor, so
+        the two can never disagree about who has standing. The hook calls it
+        through the ctx `resolve`; the executor calls it directly.
+        """
+        contact = db.get_contact(self.p.account, addr)
+        authorized = bool(contact and contact.get("auto_send_ok"))
+        established = bool(
+            contact
+            and contact.get("sent_count")
+            and contact.get("received_count")
+        )
+        # A reply to a contact we have never corresponded with is a new
+        # conversation, not a reply. An explicit human approval is stronger
+        # authority than the heuristic, so it is not suppressed by it.
+        is_cold = (
+            not in_reply_to
+            and not (contact and contact.get("approved_by_user"))
+            and not (contact and (contact.get("sent_count") or contact.get("received_count")))
+        )
+        return authorized, established, is_cold
+
+    def _hook_ctx(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Authority snapshot for the hook gate. Read live per call, because
+        standing can change between runs (a /permit lands mid-loop)."""
+        in_reply_to = (args.get("in_reply_to") or "") if name == "send_message" else ""
+        return {
+            "account": self.p.account,
+            "cfg": self.cfg.agent,
+            "account_auto_send": bool(getattr(self.p, "auto_send", False)),
+            "chat_origin": self.allow_permission_change,
+            "attachments": bool(args.get("attachments")),
+            # The executor queues held sends, so the hook stays out of the
+            # standing decision here. SDK sessions set this True (see sdk.py).
+            "direct_execute": False,
+            "resolve": lambda addr: self._standing(addr, in_reply_to),
+            "jev_by_id": self.jev_by_id,
+        }
+
     def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         fn: Callable[[dict[str, Any]], dict[str, Any]] | None = getattr(self, f"_t_{name}", None)
         if fn is None:
             return {"ok": False, "error": f"unknown tool {name}"}
+        # The hook gate runs before every tool, in the local loop exactly as
+        # in SDK runs. A denial here means the executor never sees the call.
+        from . import hooks as _hooks
+
         try:
-            return fn(args)
+            gate = _hooks.pre_tool_use(name, args or {}, self._hook_ctx(name, args or {}))
+        except Exception as e:
+            log.warning("hook gate errored on %s (%s); refusing", name, type(e).__name__)
+            return {"ok": False, "error": f"hook gate failed closed: {type(e).__name__}"}
+        if not gate.allow:
+            log.warning("hook denied %s: %s", name, gate.reason)
+            return {"ok": False, "error": gate.reason}
+        try:
+            out = fn(args)
         except Exception as e:
             log.error("tool %s failed: %s: %s", name, type(e).__name__, e)
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        try:
+            post = _hooks.post_tool_use(name, json.dumps(out, default=str)[:4000], {})
+            if "injection" in post.reason:
+                log.warning("tool %s output flagged: %s", name, post.reason)
+        except Exception:
+            pass
+        return out
 
     # ------------------------------------------------------------------ read
     def _t_get_message(self, a: dict[str, Any]) -> dict[str, Any]:
@@ -493,6 +558,7 @@ class ToolBox:
                 "description": a.get("description", ""), "location": a.get("location", ""),
                 "attendees": attendees,
             }
+            payload["action_hash"] = guards.action_hash("calendar_invite", payload)
             db.create_approval(approval_id, self.p.account, "calendar_invite", payload,
                                reason=f"invite to calendar event with {', '.join(attendees)}")
             self.stats["escalated"] += 1
@@ -530,9 +596,12 @@ class ToolBox:
             return {"ok": False, "error": "event_id is required"}
 
         approval_id = f"ap_{uuid.uuid4().hex[:12]}"
-        db.create_approval(approval_id, self.p.account, "calendar_delete", {
+        payload = {
             "event_id": event_id, "reason": a.get("reason", ""),
-        }, reason=f"delete calendar event {event_id}")
+        }
+        payload["action_hash"] = guards.action_hash("calendar_delete", payload)
+        db.create_approval(approval_id, self.p.account, "calendar_delete", payload,
+                           reason=f"delete calendar event {event_id}")
         self.stats["escalated"] += 1
         mid = self._notify(self._tagged(
             f"Approval needed: delete calendar event {event_id} — {a.get('reason', 'no reason given')}"
@@ -579,34 +648,25 @@ class ToolBox:
             return {"ok": False, "error": "outbound content tripped the injection filter; not sending"}
 
         # Per-recipient decision. Auto-send only if EVERY recipient is allowed.
+        # Standing comes from _standing(), the same source the hook gate used
+        # a moment ago — the executor re-checks rather than trusting the gate,
+        # because authority can change between the two calls.
         in_reply_to = a.get("in_reply_to") or ""
         verdicts = []
         for addr in to_addrs:
-            contact = db.get_contact(self.p.account, addr)
-            # A reply to a contact we have never corresponded with is a new
-            # conversation, not a reply. Without this the new-thread guard
-            # never fires and an approved contact could open cold threads.
-            # An explicit human approval is stronger authority than the
-            # heuristic, so it is not suppressed by it.
-            is_cold = (
-                not in_reply_to
-                and not (contact and contact.get("approved_by_user"))
-                and not (contact and (contact.get("sent_count") or contact.get("received_count")))
-            )
-            # A real two-way thread: they have written, and the user has
-            # written back. Continuing that conversation is not cold outreach.
-            established = bool(
-                contact
-                and contact.get("sent_count")
-                and contact.get("received_count")
-            )
+            authorized, established, is_cold = self._standing(addr, in_reply_to)
+            from . import hooks as _hooks
+
+            jev_ok = _hooks.jev_endorsement(
+                {"jev_by_id": self.jev_by_id}, in_reply_to)
             verdict = guards.decide(
                 sender=addr, subject=subject, body=body, account=self.p.account,
                 cfg=self.cfg.agent, account_auto_send=self.p.auto_send,
-                contact_auto_send=bool(contact and contact.get("auto_send_ok")),
+                contact_auto_send=authorized,
                 attachments=bool(attachments),
                 is_reply_to_unknown=is_cold,
                 is_established_thread=established,
+                jev_confident_act=jev_ok,
             )
             verdicts.append((addr, verdict))
 
@@ -618,6 +678,17 @@ class ToolBox:
                 self.stats["sent"] += 1
                 db.log_action("send", self.p.account, recipients, detail=subject)
                 self._notify(self._tagged(self._sent_notice(to_addrs, subject, body, verdicts)))
+                # LEARN: every send is a labelled sample. The sent copy is the
+                # draft here, so this is a confirmation; corrections arrive
+                # when the user rewrites a draft instead (see harvest).
+                from .runner import record_send_confirmation
+                from ..brain import style as _voice
+
+                record_send_confirmation(self.p.account, to_addrs, subject, body,
+                                         in_reply_to)
+                tip = _voice.maybe_propose_voice(self.p.account)
+                if tip:
+                    self._notify(self._tagged(tip))
             return {"ok": ok, "mode": "auto"}
 
         # Otherwise queue for the user. The ping must show WHAT is being
@@ -625,11 +696,15 @@ class ToolBox:
         # see) and the opening of the body. Blind approvals are rubber stamps.
         approval_id = f"ap_{uuid.uuid4().hex[:12]}"
         reasons = "; ".join(f"{addr}: {v.reason}" for addr, v in verdicts if not v.allowed)
-        db.create_approval(approval_id, self.p.account, "send", {
+        queued = {
             "to": to_addrs, "subject": subject, "body": body,
             "in_reply_to": a.get("in_reply_to"),
             "attachments": [x.path for x in attachments],
-        }, reason=reasons)
+        }
+        # Bind the approval to these exact bytes. run_approval recomputes the
+        # hash before sending; anything that drifted in between voids it.
+        queued["action_hash"] = guards.action_hash("send_message", queued)
+        db.create_approval(approval_id, self.p.account, "send", queued, reason=reasons)
         self.stats["escalated"] += 1
         ping = f"Approval needed: reply to {recipients} — {subject}"
         if attachments:

@@ -661,6 +661,82 @@ def test_unknown_step_suggests_the_obvious_typo(monkeypatch, tmp_path, capsys):
     assert "--step provider" in out
 
 
+def test_verify_jev_answers(monkeypatch):
+    from mailbot import wizard as W
+
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"answers": {"ok": {"noul": 0.0}}}'
+
+    import urllib.request as _u
+
+    monkeypatch.setattr(_u, "urlopen", lambda *a, **k: R())
+    ok, detail = W.verify_jev("https://router.test", "k", "jev")
+    assert ok and "jev" in detail
+
+
+def test_verify_jev_fails_closed(monkeypatch):
+    from mailbot import wizard as W
+
+    assert W.verify_jev("", "") == (False, "no endpoint or key")
+
+    import urllib.request as _u
+
+    def boom(*a, **k):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(_u, "urlopen", boom)
+    ok, detail = W.verify_jev("https://router.test", "k")
+    assert not ok and detail == "ConnectionError"
+
+
+def test_import_env_picks_up_jev_keys(monkeypatch, tmp_path):
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("JEV_MODEL", "jev")
+    monkeypatch.setenv("JEV_API_KEY", "jk-test")
+    monkeypatch.setenv("GOOGLE_IMAP_PASSWORD", "abcdefghijklmnop")
+    written = W.import_env()
+    assert "JEV_MODEL" in written and "JEV_API_KEY" in written
+    assert "GOOGLE_IMAP_PASSWORD" in written
+
+
+def test_jev_step_writes_enabled_offline(monkeypatch, tmp_path, capsys):
+    """Non-interactive jev step: on, sharing the router, no prompts."""
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(W, "_tty", lambda: False)
+    rc = W.cmd_setup(_setup_args(step="jev", non_interactive=True), C.load())
+    assert rc != 2
+    out = capsys.readouterr().out
+    assert "jev" in out.lower()
+    import json as _j
+
+    state = _j.loads((tmp_path / "cfg" / ".setup-state.json").read_text())
+    assert state.get("jev") in ("ok", "unverified", "failed", "off")
+
+
+def test_push_step_without_google_skips_loudly(monkeypatch, tmp_path, capsys):
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(W, "_tty", lambda: False)
+    rc = W.cmd_setup(_setup_args(step="push"), C.load())
+    assert rc != 2
+    assert "sign into Google first" in capsys.readouterr().out
+
+
+def test_doctor_reports_jev_status(monkeypatch, tmp_path, capsys):
+    C, S, W = _fresh_config(monkeypatch, tmp_path)
+    from mailbot import setup as _S
+
+    _S.write_secret("JEV_ENABLED", "0")
+    W.cmd_doctor(type("A", (), {})(), C.load())
+    assert "jev decider" in capsys.readouterr().out
+
+
 def test_every_valid_step_is_accepted(monkeypatch, tmp_path):
     """The validator and the plan must not drift apart."""
     from mailbot import wizard as W, config as C

@@ -619,7 +619,7 @@ def cmd_reset(args, cfg):
 
     tables = ("drafts", "approvals", "actions_log", "messages", "cursors",
               "runs", "contacts", "labels", "usage_daily", "scheduled_jobs",
-              "chat_history", "skills", "accounts")
+              "chat_history", "skills", "surfaced", "accounts")
     cleared = 0
     with db.db() as c:
         for t in tables:
@@ -629,6 +629,55 @@ def cmd_reset(args, cfg):
             except Exception as e:
                 print(f"  skipped {t}: {type(e).__name__}")
     print(f"cleared {cleared} tables — fresh start")
+    return 0
+
+
+def cmd_jev(args, cfg):
+    """Show the Jev decider's live config, thresholds and recent verdicts."""
+    from .agent import jev as jev_mod
+    from .agent.chatops import build_chat_ops
+
+    ops = build_chat_ops(cfg, lambda: {}, notify=None)
+    extra = ""
+    if getattr(args, "set", ""):
+        extra = f"/jev {args.set}"
+    print(ops["jev"](extra))
+    if not jev_mod.enabled(cfg):
+        return 0
+    return 0
+
+
+def cmd_chat(args, cfg):
+    """Talk to the agent from the terminal. Same handler as Telegram.
+
+    Not a second interface with its own rules — every line goes through
+    handle_text with chat="terminal", so every command works identically and
+    conversation memory is separate from the Telegram thread. Standing
+    authority changes are allowed here: the owner is in the room, typing.
+    """
+    from .agent.chat import handle_text
+    from .agent.chatops import build_chat_ops
+    from .notify.channels import build_notifiers
+
+    providers = _providers(cfg)
+    if not providers:
+        print("No authenticated accounts.")
+        return 1
+    notifier = build_notifiers(cfg)
+    ops = build_chat_ops(cfg, lambda: providers, notify=notifier.send)
+    print("Talking to mail-agent. Same commands as Telegram (/help). Ctrl-D to quit.")
+    while True:
+        try:
+            line = input("you> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        try:
+            reply = handle_text(line, cfg, providers, ops, chat="terminal")
+        except Exception as e:
+            reply = f"Something went wrong: {type(e).__name__}. Check the logs."
+        if reply:
+            print(reply)
     return 0
 
 
@@ -762,9 +811,17 @@ def main() -> int:
     p.add_argument("--yes", action="store_true", help="confirm the wipe")
     p.set_defaults(fn=cmd_reset)
 
+    p = sub.add_parser("chat", help="talk to the agent (same handler as Telegram)")
+    p.set_defaults(fn=cmd_chat)
+
     p = sub.add_parser("cal", help="show upcoming calendar events")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(fn=cmd_cal)
+
+    p = sub.add_parser("jev", help="the fast decider: config, thresholds, verdicts")
+    p.add_argument("set", nargs="?", default="",
+                   help="optional tuning hint, e.g. 'conf 0.7'")
+    p.set_defaults(fn=cmd_jev)
 
     p = sub.add_parser("setup", help="guided setup: provider, google, chat (headless-friendly)")
     p.add_argument("--yes", action="store_true", help="accept defaults, skip optional prompts")
@@ -772,7 +829,8 @@ def main() -> int:
     p.add_argument("--non-interactive", action="store_true", help="never prompt; read from env")
     p.add_argument("--import-env", action="store_true", help="copy known env vars into .secrets")
     p.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
-    p.add_argument("--step", default="", help="run one step: provider|google|chat|voice|start|verify")
+    p.add_argument("--step", default="",
+                   help="run one step: provider|jev|google|push|chat|voice|start|verify")
     p.add_argument("--print-auth-url", action="store_true",
                    help="print the Google consent URL and exit (headless boxes)")
     p.add_argument("--for-profile", default="",
@@ -796,12 +854,6 @@ def main() -> int:
         return run_demo()
     p.set_defaults(fn=_fn_demo)
 
-    p = sub.add_parser("mcp", help="serve the mailbox as MCP tools over stdio")
-    def _fn_mcp(a, c):
-        from .mcp_server import cmd_mcp
-        return cmd_mcp(a, c)
-    p.set_defaults(fn=_fn_mcp)
-
     p = sub.add_parser("dossier", help="your persona, mined from your own mailbox")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--account", default="", help="inbox account (default: current profile)")
@@ -809,31 +861,6 @@ def main() -> int:
         from .dossier import cmd_dossier
         return cmd_dossier(a, c)
     p.set_defaults(fn=_fn_dossier)
-
-    p = sub.add_parser("profiles", help="list inbox profiles")
-    def _fn_profiles(a, c):
-        from . import profiles as _profiles
-        _profiles.ensure_migrated()
-        rows = _profiles.list_profiles()
-        if not rows:
-            print("no profiles yet — run `mail-agent setup`")
-            return 1
-        cur = _profiles.get_current()
-        for r in rows:
-            mark = "●" if cur and r["id"] == cur["id"] else "○"
-            addr = ""
-            try:
-                from .storage import db as _db
-                with _db.db() as _c:
-                    arow = _c.execute("SELECT address FROM accounts WHERE id=?",
-                                      (r["account"],)).fetchone()
-                    addr = (arow["address"] or "") if arow else ""
-            except Exception:
-                pass
-            model = (r.get("model_override") or "").strip() or "(first provider)"
-            print(f"  {mark} {r['name']:<16} {addr or r['account']:<28} model: {model}")
-        return 0
-    p.set_defaults(fn=_fn_profiles)
 
     args = ap.parse_args()
     if not args.cmd:

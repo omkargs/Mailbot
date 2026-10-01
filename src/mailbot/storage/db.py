@@ -217,6 +217,24 @@ SCHEMA = [
         created_at  TEXT NOT NULL
     )
     """,
+    # ---------- one card per message, ever ----------
+    # The single loudest failure mode of a background agent is the same
+    # message asking for the same thing every scan. This table is the memory
+    # that stops it: once a message has been surfaced, it is never surfaced
+    # again, no matter how many cycles see it. The row is the receipt.
+    """
+    CREATE TABLE IF NOT EXISTS surfaced (
+        account    TEXT NOT NULL,
+        message_id TEXT NOT NULL,               -- provider id, unique per mailbox
+        kind       TEXT NOT NULL DEFAULT 'ask', -- ask|filed|note|send_summary
+        detail     TEXT,
+        first_ts   TEXT NOT NULL,
+        last_ts    TEXT NOT NULL,
+        hits       INTEGER NOT NULL DEFAULT 1,  -- cycles that saw it, for stats
+        PRIMARY KEY (account, message_id, kind)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_surfaced_msg ON surfaced(account, message_id)",
 ]
 
 
@@ -817,3 +835,68 @@ def list_drafts(account: str | None = None, limit: int = 50) -> list[dict[str, A
         params.append(account)
     with db() as c:
         return [dict(r) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", params + [limit])]
+
+
+def mark_draft_harvested(id: str, account: str) -> None:
+    """A draft the LEARN loop has consumed. Harvested drafts leave the
+    'created' pool so the next scan does not diff them again — one draft,
+    one sample, ever."""
+    with db() as c:
+        c.execute("UPDATE drafts SET status='harvested' WHERE id=? AND account=?",
+                  (id, account))
+
+
+# ---------------------------------------------------------------- surfaced
+# "One card per message, ever." Every operator-facing message about a given
+# message is claimed here first. The claim is the dedupe, so a caller cannot
+# forget to check: if the claim fails, the caller has already been told this
+# once and must stay quiet.
+
+def claim_surfaced(account: str, message_id: str, kind: str = "ask",
+                   detail: str = "") -> bool:
+    """Claim the right to tell the operator about this message, once.
+
+    Returns True the first time and False forever after. Atomic, so two
+    concurrent scans cannot both win and post the same card twice.
+    """
+    if not message_id:
+        return True
+    ts = now()
+    with db() as c:
+        cur = c.execute(
+            """INSERT INTO surfaced (account, message_id, kind, detail, first_ts, last_ts, hits)
+               VALUES (?,?,?,?,?,?,1)
+               ON CONFLICT(account, message_id, kind) DO NOTHING""",
+            (account, message_id, kind, detail[:300], ts, ts),
+        )
+        if cur.rowcount:
+            return True
+        c.execute(
+            "UPDATE surfaced SET hits=hits+1, last_ts=? WHERE account=? AND message_id=? AND kind=?",
+            (ts, account, message_id, kind),
+        )
+        return False
+
+
+def was_surfaced(account: str, message_id: str, kind: str | None = None) -> bool:
+    """Has this message already been surfaced? `kind=None` means any kind."""
+    if not message_id:
+        return False
+    with db() as c:
+        if kind:
+            row = c.execute(
+                "SELECT 1 FROM surfaced WHERE account=? AND message_id=? AND kind=?",
+                (account, message_id, kind)).fetchone()
+        else:
+            row = c.execute(
+                "SELECT 1 FROM surfaced WHERE account=? AND message_id=? LIMIT 1",
+                (account, message_id)).fetchone()
+    return row is not None
+
+
+def release_surfaced(account: str, message_id: str, kind: str = "ask") -> None:
+    """Drop a claim. Only for the case where the notify itself failed and the
+    message must be allowed to speak again next cycle."""
+    with db() as c:
+        c.execute("DELETE FROM surfaced WHERE account=? AND message_id=? AND kind=?",
+                  (account, message_id, kind))

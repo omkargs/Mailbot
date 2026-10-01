@@ -467,7 +467,7 @@ def test_chat_records_both_sides_of_a_conversation(cfg, provider):
     ops_holder = {}
     from mailbot.agent.chatops import build_chat_ops
     ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
-    ops["ask"] = lambda q: ask_mod.answer(q, cfg, None)
+    ops["ask"] = lambda q, chat="owner": ask_mod.answer(q, cfg, None)
     from mailbot.agent.chat import handle_text
     handle_text("the question", cfg, {"google": provider}, ops)
     roles = [h["role"] for h in chatlog.recent()]
