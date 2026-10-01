@@ -309,6 +309,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             f"margins: P(ask) ≥ {j.ask_prob_floor} → ASK · "
             f"margin < {j.min_margin} → ASK · "
             f"auto: P(act) ≥ {j.act_p} + margin ≥ {j.auto_margin}",
+            f"calls: {'2 (double-check on)' if j.double_check else '1'}",
         ]
         if not jev_mod.enabled(cfg):
             out += ["", "Jev is off, so every message reaches the flagship "

@@ -468,13 +468,13 @@ def combine(first: JevVerdict, second: JevVerdict, cfg) -> JevVerdict:
 
 
 def decide(mail: dict[str, Any], cfg) -> JevVerdict:
-    """Ask Jev about one message — twice, independently. Never raises.
+    """Ask Jev about one message. Never raises — failure is ASK.
 
-    Double verification: two calls, two judgments, one verdict. Agreement
-    strengthens (at the weaker call's confidence); disagreement holds the
-    mail. A single stochastic judgment is an opinion; two that agree are
-    evidence. Disable with JEV_DOUBLE_CHECK=0, at the cost of exactly the
-    safety this exists for.
+    One call. The margin rules do the doubting instead: a contested or
+    coin-flip ACT is held on the single call's own numbers, which is cheaper
+    and faster than asking twice and no less safe for it. Set
+    JEV_DOUBLE_CHECK=1 for two-call verification (agreement strengthens at
+    the weaker call; disagreement holds).
     """
     url, key, model = cfg.jev.endpoint(cfg.router)
     if not (url and key):

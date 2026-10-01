@@ -557,7 +557,7 @@ def test_combine_endorsement_needs_both():
     assert jev.combine(a, c, _cfg()).auto_ok is False
 
 
-def test_decide_calls_twice(monkeypatch):
+def test_decide_calls_once_by_default(monkeypatch):
     import requests
 
     from mailbot.agent import jev
@@ -575,6 +575,30 @@ def test_decide_calls_twice(monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **k: R())
     v = jev.decide({"sender": "news@list.com", "subject": "weekly",
                     "body": "hello here is the news"}, _cfg())
+    assert v.verdict == "FILE" and len(calls) == 1
+    assert "2/2 agree" not in v.reason
+
+
+def test_decide_calls_twice_when_enabled(monkeypatch):
+    import requests
+
+    from mailbot.agent import jev
+
+    calls = []
+
+    class R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            calls.append(1)
+            return _ans("FILE", 0.95, importance="bulk", tier="skip")
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: R())
+    c = _cfg()
+    c.jev.double_check = True
+    v = jev.decide({"sender": "news@list.com", "subject": "weekly",
+                    "body": "hello here is the news"}, c)
     assert v.verdict == "FILE" and len(calls) == 2
     assert "2/2 agree" in v.reason
 
@@ -600,32 +624,11 @@ def test_decide_second_failure_holds(monkeypatch):
         return R()
 
     monkeypatch.setattr(requests, "post", flaky)
-    v = jev.decide({"sender": "a@b.com", "subject": "hi",
-                    "body": "hello friend, confirming friday"}, _cfg())
-    assert v.verdict == "ASK" and "second jev call failed" in v.reason
-
-
-def test_decide_single_call_when_disabled(monkeypatch):
-    import requests
-
-    from mailbot.agent import jev
-
-    calls = []
-
-    class R:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            calls.append(1)
-            return _ans("FILE", 0.95)
-
-    monkeypatch.setattr(requests, "post", lambda *a, **k: R())
     c = _cfg()
-    c.jev.double_check = False
-    v = jev.decide({"sender": "news@list.com", "subject": "w",
-                    "body": "hello weekly news"}, c)
-    assert v.verdict == "FILE" and len(calls) == 1
+    c.jev.double_check = True
+    v = jev.decide({"sender": "a@b.com", "subject": "hi",
+                    "body": "hello friend, confirming friday"}, c)
+    assert v.verdict == "ASK" and "second jev call failed" in v.reason
 
 
 def test_plain_reason_speaks_human():
