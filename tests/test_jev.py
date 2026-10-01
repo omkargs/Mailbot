@@ -628,6 +628,62 @@ def test_decide_single_call_when_disabled(monkeypatch):
     assert v.verdict == "FILE" and len(calls) == 1
 
 
+def test_plain_reason_speaks_human():
+    from mailbot.agent.jev import JevVerdict
+
+    cases = [
+        ("low confidence (0.52 < 0.60)", "not sure what this one wants"),
+        ("needs the human (0.97)", "this one needs you"),
+        ("contested judgment (P(ask) 0.44)", "my two reads disagreed"),
+        ("coin-flip verdict (margin 0.01)", "too close to call"),
+        ("money involved (0.80)", "money involved"),
+        ("reply would commit you (0.70)", "commit you to something"),
+        ("sensitivity 2/3", "too sensitive"),
+        ("emotionally loaded (2/3)", "emotionally loaded"),
+        ("second jev call failed (ConnectionError) — held", "double-check failed"),
+        ("jev disagreed (ACT vs ASK) — held", "disagreed"),
+        ("headers look suspicious", "headers look suspicious"),
+    ]
+    for reason, plain in cases:
+        v = JevVerdict("ASK", 0.5, reason=reason)
+        assert plain in v.plain_reason, (reason, v.plain_reason)
+        assert "(" not in v.plain_reason, v.plain_reason
+
+
+def test_card_has_no_numbers(provider):
+    from mailbot.agent import jev
+    from mailbot.agent.runner import _hold_jev_asks
+    from mailbot.agent.tools import ToolBox
+
+    sent = []
+    box = ToolBox(provider, _cfg(), run_id=1,
+                  notify=lambda t, approval_id="": sent.append(t) or "mid1")
+    m = {"id": "mp1", "sender": "a@b.com", "subject": "contract now",
+         "body": "please review the contract attached here today"}
+    m["_jev"] = jev.interpret(_ans("ASK", 0.52), _cfg())
+    _hold_jev_asks([m], box, "google")
+    assert sent and "0.52" not in sent[0] and "0.60" not in sent[0]
+    assert "agree" not in sent[0]
+
+
+def test_scan_never_echoes_escalations(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("ASK", 0.9), c))
+    notes: list[str] = []
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(sender="a@b.com", subject="please decide",
+                         body="hello friend, need your decision on friday", date=now)
+    R.scan(provider, cfg, notify=lambda t, approval_id="": notes.append(t))
+    assert any(n.startswith("Needs you:") for n in notes), notes
+    assert not any("need you" in n and not n.startswith("Needs you:") for n in notes), notes
+
+
 def test_filed_mail_gets_newsletter_label(provider, cfg, monkeypatch):
     import datetime as _dt
 
@@ -686,6 +742,51 @@ def test_ensure_labels_creates_missing_set(provider, cfg):
     R.ensure_labels(provider, box)
     names = {v for v in provider.labels.values()} | set(provider.labels)
     assert "Newsletter" in provider.labels.values() or "Newsletter" in provider.labels
+
+
+def test_noreply_ask_noted_never_carded(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+    from mailbot.storage import db
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("ASK", 0.9), c))
+    notes: list[str] = []
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(sender="no-reply@accounts.google.com", subject="Security alert",
+                         body="hello friend, a new sign in happened today", date=now)
+    res = R.scan(provider, cfg, notify=lambda t, approval_id="": notes.append(t))
+    # Shown (digest), never carded, never drafted, never queued.
+    assert any("Noted, no action" in (res.get("summary") or "") for _ in [0])
+    assert not any("Needs you" in n for n in notes)
+    assert db.pending_approvals() == [] and provider.drafted == []
+    # Consumed: a second scan finds nothing new to say.
+    notes.clear()
+    res2 = R.scan(provider, cfg, notify=lambda t, approval_id="": notes.append(t))
+    assert res2.get("status") == "empty" and notes == []
+
+
+def test_card_hides_decider_internals(provider):
+    from mailbot.agent import jev
+    from mailbot.agent.runner import _hold_jev_asks
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    cfg = _cfg()
+    sent = []
+    box = ToolBox(provider, cfg, run_id=1,
+                  notify=lambda t, approval_id="": sent.append(t) or "mid1")
+    m = {"id": "mc1", "sender": "a@b.com", "subject": "contract now",
+         "body": "please review the contract attached here today"}
+    v = jev.interpret(_ans("ASK", 0.9), cfg)
+    v.reason += " (2/2 agree)"
+    m["_jev"] = v
+    _hold_jev_asks([m], box, "google")
+    assert sent and "(2/2 agree)" not in sent[0]
+    assert db.claim_surfaced("google", "mc1", "ask", "") is False
 
 
 def test_filed_reported_once_per_day(provider, cfg, monkeypatch):

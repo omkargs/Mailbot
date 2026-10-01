@@ -192,6 +192,37 @@ class JevVerdict:
         return out
 
     @property
+    def plain_reason(self) -> str:
+        """The reason in human words. The machine reason keeps its numbers
+        (logs, ledger, /jev) — the card does not. Nobody was ever reassured
+        by "(0.52 < 0.60)".
+        """
+        import re
+
+        r = re.sub(r"\s*\(.*?\)", "", self.reason or "").strip()
+        mapping = [
+            ("low confidence", "not sure what this one wants"),
+            ("needs the human", "this one needs you"),
+            ("contested judgment", "my two reads disagreed"),
+            ("coin-flip verdict", "too close to call"),
+            ("money involved", "money involved — your call"),
+            ("reply would commit you", "answering would commit you to something"),
+            ("sensitivity", "too sensitive to auto-handle"),
+            ("emotionally loaded", "emotionally loaded — needs a human"),
+            ("second jev call failed", "my double-check failed, holding it"),
+            ("unrecognised action", "couldn't judge it"),
+            ("jev unavailable", "decider was unreachable, holding it"),
+            ("jev not configured", "decider off, holding it"),
+            ("suspicious headers", "headers look suspicious"),
+            ("archive failed", "couldn't file it, holding it"),
+            ("filing would drop", "looks like it needs you"),
+        ]
+        for prefix, plain in mapping:
+            if r.startswith(prefix):
+                return plain
+        return r or "needs you"
+
+    @property
     def confident_auto(self) -> bool:
         """May this verdict endorse an unattended send by itself?"""
         return self.auto_ok

@@ -149,14 +149,19 @@ def run_once(
         # Replies inherit their message's verdict: a high-margin ACT opens the
         # contact-standing gate for that reply through the executor. The box
         # carries the map so the tool layer can look it up by in_reply_to.
+        pending, noted = _note_noreply(pending, account)
         box.jev_by_id = {m["id"]: m["_jev"] for m in pending if "_jev" in m}
         pending, held = _hold_jev_asks(pending, box, account)
         if not pending:
             db.finish_run(run_id, triaged=box.stats["triaged"],
                           escalated=box.stats["escalated"],
                           input_tokens=0, output_tokens=0, status="ok")
+            summary = f"{box.stats['escalated']} thing(s) need you."
+            if noted:
+                summary += (" Noted, no action: " + "; ".join(noted[:4]) +
+                            (f" (+{len(noted) - 4} more)" if len(noted) > 4 else ""))
             return {"status": "ok", "run_id": run_id,
-                    "summary": f"{box.stats['escalated']} thing(s) need you.",
+                    "summary": summary,
                     "stats": box.stats,
                     "usage": {"input_tokens": 0, "output_tokens": 0,
                               "cache_read": 0, "cache_write": 0}}
@@ -385,6 +390,31 @@ def _card_flags(m: dict[str, Any]) -> str:
     return f" [{' · '.join(flags)}]" if flags else ""
 
 
+def _note_noreply(
+    pending: list[dict[str, Any]],
+    account: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """No-reply mail is shown, never asked about.
+
+    A card demands an action, and there is no action: no send, no draft, no
+    approval that could matter. So these are noted (one digest line, visible
+    in history) and marked processed — not carded, not drafted, not queued,
+    and never re-surfaced. Even an ASK verdict does not card here; the digest
+    line IS the "showing what's going on".
+    """
+    rest: list[dict[str, Any]] = []
+    noted: list[str] = []
+    for m in pending:
+        if not guards.is_noreply(m.get("sender", "")):
+            rest.append(m)
+            continue
+        noted.append(
+            f"{m.get('sender', '')} — {(m.get('subject', '') or '(no subject)')[:60]}")
+        db.mark_processed(m["id"], account)
+        db.log_action("noted", account, m["id"], detail="no-reply, no action")
+    return rest, noted
+
+
 def _hold_jev_asks(
     pending: list[dict[str, Any]],
     box,
@@ -403,9 +433,11 @@ def _hold_jev_asks(
         if v is None or v.verdict != jev.ASK:
             rest.append(m)
             continue
+        # The card speaks plain words; the machine reason (numbers and all)
+        # stays in the claim detail and the ledger for anyone asking why.
         question = (
             f"{m.get('sender', '')} — {m.get('subject', '') or '(no subject)'}"
-            f"{_card_flags(m)}: {v.reason}"
+            f"{_card_flags(m)}: {v.plain_reason}"
         )
         if not db.claim_surfaced(account, m["id"], "ask", v.reason):
             # Already asked. The user knows; asking again is the noise this
@@ -628,13 +660,11 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
 
         tag = header_for(profile, provider.address if hasattr(provider, "address") else "")
         st = res.get("stats", {})
-        escalated = st.get("escalated", 0)
         summary = (res.get("summary") or "").strip()
-        if escalated:
-            head = f"{escalated} thing{'s' if escalated != 1 else ''} need you"
-            body = f"\n\n{summary}" if summary else ""
-            notify(f"{tag} {head}{body}" if tag else f"{head}{body}")
-        elif not st.get("sent") and not st.get("drafted") and summary:
+        # No echo for escalations, ever: every held message already got its
+        # own card this run, and a count line on top of N cards is the same
+        # news twice. The count stays in the return value and the logs.
+        if not st.get("escalated") and not st.get("sent") and not st.get("drafted") and summary:
             # Only chatter when the agent judged something worth saying —
             # or filed something worth knowing about. Filed-mail reports go
             # out once a day, not once a scan: silent archiving is how mail
