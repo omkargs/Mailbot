@@ -417,6 +417,71 @@ def test_draft_twice_reuses_one(provider, cfg):
     assert len(provider.drafted) == 1
 
 
+def test_chat_send_skips_standing_queue(provider, cfg):
+    """The operator's 'send it' IS the approval: chat-origin sends go out
+    under human authority instead of queueing a second approval."""
+    from mailbot.agent.tools import ToolBox
+
+    provider.auto_send = False
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
+    out = box.run("send_message", {"to": ["stranger@x.com"], "subject": "Re: trip",
+                                   "body": "hey friend, confirming friday works fine"})
+    assert out.get("mode") == "auto" and len(provider.sent) == 1
+
+
+def test_scan_send_still_queues_without_standing(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=False)
+    out = box.run("send_message", {"to": ["stranger@x.com"], "subject": "Re: trip",
+                                   "body": "hey friend, confirming friday works fine",
+                                   "in_reply_to": "m1"})
+    assert out.get("mode") == "queued"
+    assert provider.sent == [] and len(db.pending_approvals()) == 1
+
+
+def test_kill_switch_survives_human_authority(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    cfg.agent.send_mode = "never"
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
+    out = box.run("send_message", {"to": ["boss@corp.com"], "subject": "Re: hi",
+                                   "body": "hello friend, confirming friday works"})
+    # The kill switch blocks SENDING, not queueing: the reply waits for a
+    # human, nothing leaves the box.
+    assert out.get("mode") == "queued" and provider.sent == []
+
+
+def test_permission_refuses_unknown_address(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
+    out = box.run("set_contact_permission", {"address": "dreamedup@x.com", "allow": True})
+    assert out["ok"] is False and "has ever written here" in out["error"]
+
+
+def test_permission_allows_known_address(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "real@x.com", received=True)
+    box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
+    out = box.run("set_contact_permission", {"address": "real@x.com", "allow": True})
+    assert out["ok"] is True
+
+
+def test_daemon_lock_is_exclusive(cfg, tmp_path, monkeypatch):
+    import mailbot.cli as CLI
+    import mailbot.config as C
+
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path / "data")
+    assert CLI.hold_daemon_lock() is True
+    assert CLI.hold_daemon_lock() is False
+
+
 def test_pending_proposal_lifecycle(provider, cfg):
     from mailbot.agent.learning import pending_proposal
     from mailbot.storage import db

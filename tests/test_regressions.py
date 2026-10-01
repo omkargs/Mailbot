@@ -715,6 +715,7 @@ def test_agent_can_change_who_gets_unattended_replies(cfg, provider):
     from mailbot.agent.tools import ToolBox
     from mailbot.storage import db
 
+    db.bump_contact("google", "pal@example.com", received=True)
     box = ToolBox(provider, cfg, run_id=1, allow_permission_change=True)
     res = box.run("set_contact_permission", {"address": "MSK GT <pal@example.com>", "allow": True})
     assert res["ok"]

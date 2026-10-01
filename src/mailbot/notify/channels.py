@@ -138,36 +138,95 @@ class TelegramNotifier(BaseNotifier):
         self.token = token
         self.chat_id = chat_id
         # Highest update_id consumed. Without it Telegram re-delivers the same
-        # batch on every poll.
-        self._offset: int | None = None
+        # batch on every poll — and without PERSISTING it, every restart
+        # re-answers everything since the last poll. That restart-echo is
+        # where most "the bot said it twice" comes from.
+        self._offset: int | None = self._load_offset()
         # Long polling: Telegram holds the request open and answers the instant
         # a message arrives, instead of us hammering getUpdates and finding
         # nothing. This is what makes chat feel instant.
         self.long_poll = long_poll
+
+    @staticmethod
+    def _offset_file() -> str:
+        from ..config import DATA_DIR
+
+        return str(DATA_DIR / "telegram_offset")
+
+    def _load_offset(self) -> int | None:
+        try:
+            with open(self._offset_file()) as f:
+                return int(f.read().strip() or 0) or None
+        except (OSError, ValueError):
+            return None
+
+    def _save_offset(self) -> None:
+        if not self._offset:
+            return
+        try:
+            from pathlib import Path as _P
+
+            p = _P(self._offset_file())
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(str(self._offset))
+        except OSError:
+            pass
 
     def send(self, text: str, approval_id: str = "", **kw: Any) -> str | None:
         # Telegram is a phone, not a terminal. Long replies from the model
         # were arriving as a wall of pasted mail. Cap it, and say so rather
         # than cutting off mid-sentence without explanation.
         text = _compact(text)
+        markup = None
         if approval_id:
+            # Tap, don't type: Send/Discard buttons ride on the card, and the
+            # /approve lines stay as the fallback for clients without them.
+            # callback_data has a 64-byte ceiling — `ap:<id>` fits easily.
             text += f"\n\n/approve {approval_id}\n/discard {approval_id}"
+            markup = {"inline_keyboard": [[
+                {"text": "✅ Send", "callback_data": f"ap:{approval_id}"},
+                {"text": "🗑 Discard", "callback_data": f"deny:{approval_id}"},
+            ]]}
         # The brief and chat commands write markdown, not HTML. Sending that
         # under parse_mode=HTML makes Telegram reject the whole message with
         # HTTP 400 the moment any content contains a bare "<" — an address, a
         # company name, "3 < 5". So escape the HTML first, then convert the
         # markdown to the inline tags Telegram actually understands.
         text = _md_to_html(text)
+        payload: dict[str, Any] = {"chat_id": self.chat_id, "text": text,
+                                   "parse_mode": "HTML"}
+        if markup:
+            payload["reply_markup"] = markup
         try:
             r = requests.post(f"{self.API}/bot{self.token}/sendMessage",
-                              json={"chat_id": self.chat_id, "text": text,
-                                    "parse_mode": "HTML"}, timeout=_timeout)
+                              json=payload, timeout=_timeout)
             r.raise_for_status()
             return str(r.json().get("result", {}).get("message_id", ""))
         except Exception as e:
             # Log the body's description, not just the exception class. A bare
             # "HTTPError" told us nothing about why every send was failing.
             log.warning("telegram send failed: %s: %s", type(e).__name__, _err_detail(e))
+
+    def answer_callback(self, callback_id: str, text: str) -> None:
+        """Acknowledge a button tap. Without this the button spins forever
+        on the operator's screen, which reads as a dead bot."""
+        try:
+            requests.post(f"{self.API}/bot{self.token}/answerCallbackQuery",
+                          json={"callback_query_id": callback_id,
+                                "text": text[:190]}, timeout=_timeout)
+        except Exception as e:
+            log.debug("answerCallbackQuery failed: %s", type(e).__name__)
+
+    def strip_buttons(self, chat_id: str, message_id: int) -> None:
+        """Remove the keyboard after a decision. The atomic approval claim
+        already makes double-taps safe; this makes them visibly final."""
+        try:
+            requests.post(f"{self.API}/bot{self.token}/editMessageReplyMarkup",
+                          json={"chat_id": chat_id, "message_id": message_id,
+                                "reply_markup": {"inline_keyboard": []}},
+                          timeout=_timeout)
+        except Exception as e:
+            log.debug("strip buttons failed: %s", type(e).__name__)
 
     def poll_once(self) -> list[dict[str, Any]]:
         """Fetch unconsumed updates.
@@ -195,8 +254,29 @@ class TelegramNotifier(BaseNotifier):
         if result:
             # Telegram confirms the batch by advancing past its last id.
             self._offset = result[-1]["update_id"] + 1
+            self._save_offset()
         out = []
         for upd in result:
+            # Button taps arrive as callback queries, not messages. The tapper
+            # must be the owner — anyone else's tap is dropped like a
+            # stranger's message, for the same reason.
+            q = upd.get("callback_query") or {}
+            if q:
+                if self.chat_id and str((q.get("from") or {}).get("id", "")) != str(self.chat_id):
+                    log.warning("telegram: dropped button tap from unknown user")
+                    continue
+                data = str(q.get("data") or "")
+                qmsg = q.get("message") or {}
+                qchat = qmsg.get("chat") or {}
+                if self.chat_id and str(qchat.get("id", "")) != str(self.chat_id):
+                    continue
+                for cmd, act in (("ap:", "approve"), ("deny:", "deny")):
+                    if data.startswith(cmd) and len(data) > len(cmd):
+                        out.append({"action": act, "approval_id": data[len(cmd):],
+                                    "callback_id": q.get("id", ""),
+                                    "callback_chat": str(qchat.get("id", "") or self.chat_id),
+                                    "callback_msg": qmsg.get("message_id", 0)})
+                continue
             msg = upd.get("message") or {}
             # Never respond to our own messages, or a bot's.
             if (msg.get("from") or {}).get("is_bot"):
@@ -284,6 +364,24 @@ class MultiNotifier(BaseNotifier):
             first = first or mid
         return first
 
+    def answer_callback(self, callback_id: str, text: str) -> None:
+        for n in self.notifiers:
+            fn = getattr(n, "answer_callback", None)
+            if callable(fn):
+                try:
+                    fn(callback_id, text)
+                except Exception:
+                    pass
+
+    def strip_buttons(self, chat_id: str, message_id: int) -> None:
+        for n in self.notifiers:
+            fn = getattr(n, "strip_buttons", None)
+            if callable(fn):
+                try:
+                    fn(chat_id, message_id)
+                except Exception:
+                    pass
+
     def poll_once(self) -> list[dict[str, Any]]:
         out = []
         for n in self.notifiers:
@@ -367,14 +465,29 @@ class ApprovalListener:
 
             key = f"{action}:{d['approval_id']}"
             if self._mark(key):
+                # A double-tap still gets its spinner stopped, or the button
+                # looks dead even though the first tap worked.
+                if d.get("callback_id"):
+                    self.notifier.answer_callback(d["callback_id"], "Already decided.")
                 continue
             provider = self.providers.get("google") or next(iter(self.providers.values()), None)
             if not provider:
                 continue
             try:
-                run_approval(provider.account, provider, self.cfg, d["approval_id"],
-                             action == "approve", notify=self.notifier.send)
+                res = run_approval(provider.account, provider, self.cfg, d["approval_id"],
+                                   action == "approve", notify=self.notifier.send)
                 handled += 1
             except Exception as e:
                 log.error("approval handling failed: %s", type(e).__name__)
+                res = {"ok": False, "error": type(e).__name__}
+            if d.get("callback_id"):
+                if res.get("sent"):
+                    note = "Sent ✓"
+                elif res.get("ok"):
+                    note = "Discarded."
+                else:
+                    note = f"Not sent: {res.get('error', 'held')}"[:190]
+                self.notifier.answer_callback(d["callback_id"], note)
+                if d.get("callback_msg"):
+                    self.notifier.strip_buttons(d.get("callback_chat", ""), d["callback_msg"])
         return handled

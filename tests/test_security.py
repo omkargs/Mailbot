@@ -220,6 +220,9 @@ def test_scan_toolbox_refuses_permission_change(provider):
 
 
 def test_chat_toolbox_allows_permission_change(provider):
+    from mailbot.storage import db as _db
+
+    _db.bump_contact("google", "friend@x.com", received=True)
     notified = []
     box = _box(provider, allow_permission_change=True)
     box._notify = lambda t, approval_id="": notified.append(t) or "1"

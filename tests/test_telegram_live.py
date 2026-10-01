@@ -69,6 +69,123 @@ def test_an_approval_arrives_with_the_commands_to_answer_it(tg):
     assert "/discard abc123" in text
 
 
+def test_offset_survives_restart(tg, tmp_path, monkeypatch):
+    from mailbot.notify.channels import TelegramNotifier
+
+    import mailbot.config as C
+
+    monkeypatch.setattr(C, "DATA_DIR", tmp_path / "data")
+
+    class R:
+        def __init__(self, result):
+            self._result = result
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": self._result}
+
+    import mailbot.notify.channels as CH
+
+    seen_params = []
+
+    def fake_get(url, params=None, timeout=None):
+        seen_params.append(dict(params or {}))
+        return R([{"update_id": 41, "message": {
+            "message_id": 1, "from": {"id": 7, "is_bot": False},
+            "chat": {"id": 12345, "type": "private"}, "text": "hi"}}])
+
+    monkeypatch.setattr(CH.requests, "get", fake_get)
+    n1 = TelegramNotifier("tok", "12345", long_poll=False)
+    assert n1._offset is None
+    out = n1.poll_once()
+    assert out and out[0]["update_id"] == 41
+    # A fresh notifier (a restart) resumes past the consumed update.
+    n2 = TelegramNotifier("tok", "12345", long_poll=False)
+    assert n2._offset == 42
+    n2.poll_once()
+    assert seen_params[-1].get("offset") == 42
+
+
+def test_approval_card_carries_buttons(tg, monkeypatch):
+    from mailbot.notify.channels import TelegramNotifier
+
+    import mailbot.notify.channels as CH
+
+    posted = []
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": {"message_id": 9}}
+
+    def fake_post(url, json=None, timeout=None):
+        posted.append(json)
+        return R()
+
+    monkeypatch.setattr(CH.requests, "post", fake_post)
+    n = TelegramNotifier("tok", "12345", long_poll=False)
+    n.send("Approval needed: reply — hi", approval_id="ap_abc123")
+    kb = posted[0]["reply_markup"]["inline_keyboard"][0]
+    assert kb[0] == {"text": "✅ Send", "callback_data": "ap:ap_abc123"}
+    assert kb[1] == {"text": "🗑 Discard", "callback_data": "deny:ap_abc123"}
+    assert len(kb[0]["callback_data"]) <= 64
+
+
+def test_button_tap_routes_to_approval(tg, monkeypatch):
+    from mailbot.notify.channels import TelegramNotifier
+
+    import mailbot.notify.channels as CH
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": [{
+                "update_id": 5,
+                "callback_query": {
+                    "id": "cb1",
+                    "from": {"id": 12345},
+                    "data": "ap:ap_abc123",
+                    "message": {"message_id": 9, "chat": {"id": 12345}},
+                }}]}
+
+    monkeypatch.setattr(CH.requests, "get", lambda *a, **k: R())
+    n = TelegramNotifier("tok", "12345", long_poll=False)
+    out = n.poll_once()
+    assert out == [{"action": "approve", "approval_id": "ap_abc123",
+                    "callback_id": "cb1", "callback_chat": "12345",
+                    "callback_msg": 9}]
+
+
+def test_stranger_tap_dropped(tg, monkeypatch):
+    from mailbot.notify.channels import TelegramNotifier
+
+    import mailbot.notify.channels as CH
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": [{
+                "update_id": 6,
+                "callback_query": {
+                    "id": "cb2",
+                    "from": {"id": 666},
+                    "data": "ap:ap_abc123",
+                    "message": {"message_id": 9, "chat": {"id": 12345}},
+                }}]}
+
+    monkeypatch.setattr(CH.requests, "get", lambda *a, **k: R())
+    n = TelegramNotifier("tok", "12345", long_poll=False)
+    assert n.poll_once() == []
+
+
 def test_it_chats_back(tg):
     UPDATES.append([{"update_id": 1, "message": {
         "message_id": 1, "from": {"id": 7, "is_bot": False},

@@ -740,6 +740,10 @@ class ToolBox:
 
             jev_ok = _hooks.jev_endorsement(
                 {"jev_by_id": self.jev_by_id}, in_reply_to)
+            # In direct owner chat the operator's "send it" IS the approval:
+            # standing, escalation and thread gates step aside exactly as in
+            # the approval path, while kill switch and injection still hold.
+            # The ask prompt is what stops the model calling this unasked.
             verdict = guards.decide(
                 sender=addr, subject=subject, body=body, account=self.p.account,
                 cfg=self.cfg.agent, account_auto_send=self.p.auto_send,
@@ -748,6 +752,7 @@ class ToolBox:
                 is_reply_to_unknown=is_cold,
                 is_established_thread=established,
                 jev_confident_act=jev_ok,
+                human_authority=self.allow_permission_change,
             )
             verdicts.append((addr, verdict))
 
@@ -878,6 +883,23 @@ class ToolBox:
         addr = normalize_address(raw)
         if not is_valid_address(addr):
             return {"ok": False, "error": f"not a usable address: {raw!r}"}
+        if bool(a.get("allow", True)):
+            # No hallucinated allowlists. The model once approved
+            # "mskgt@gmail.com" — an address nobody ever wrote from — because
+            # it sounded like the real correspondent. Standing is granted to
+            # people in the mailbox, not names dreamed up mid-sentence.
+            known = db.get_contact(self.p.account, addr)
+            seen = False
+            if known is None:
+                with db.db() as c:
+                    seen = c.execute(
+                        "SELECT 1 FROM messages WHERE account=? AND "
+                        "(sender LIKE ? OR recipients LIKE ?) LIMIT 1",
+                        (self.p.account, f"%{addr}%", f"%{addr}%")).fetchone() is not None
+            if known is None and not seen:
+                return {"ok": False, "error":
+                        f"refusing: nobody at {addr} has ever written here — "
+                        f"use their exact address from the thread, not a guess"}
         allow = bool(a.get("allow", True))
         db.set_contact_auto_send(self.p.account, addr, allow)
         db.log_action("contact_permission", self.p.account, addr,

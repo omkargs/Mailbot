@@ -22,7 +22,11 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-MAX_TURNS = 8
+# Multi-action requests (approve this, read that mail, ask a question, set a
+# calendar event) burn a turn per tool round-trip. Eight died mid-task on
+# exactly that shape. Twelve covers it; beyond that the request should be
+# split, not looped.
+MAX_TURNS = 12
 
 # The router serves many models behind one alias, and some of them introduce
 # themselves by their own name and maker mid-conversation. The user hired
@@ -264,7 +268,21 @@ def answer(
                 break
             messages.append({"role": "user", "content": results})
         else:
-            reply = reply or "I ran out of steps on that. Try asking something more specific."
+            # Out of turns with work still open. Report what actually got
+            # done instead of discarding it — a summary of partial progress
+            # beats "try again" after the agent already sent half the task.
+            done = []
+            if box.stats["sent"]:
+                done.append(f"sent {box.stats['sent']}")
+            if box.stats["drafted"]:
+                done.append(f"drafted {box.stats['drafted']}")
+            if box.stats["escalated"]:
+                done.append(f"{box.stats['escalated']} waiting on you")
+            reply = reply or (
+                "I ran out of steps before finishing."
+                + (f" Done so far: {', '.join(done)}." if done else "")
+                + " Tell me what is left and I'll continue from here — "
+                "nothing already done will be repeated.")
 
         db.finish_run(
             run_id,

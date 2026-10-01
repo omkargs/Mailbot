@@ -128,18 +128,37 @@ def decide(
     is_reply_to_unknown: bool = False,
     is_established_thread: bool = False,
     jev_confident_act: bool = False,
+    human_authority: bool = False,
 ) -> Decision:
     """Should this send go out unattended?
 
     Order matters: hard blocks first, then escalation signals, then allowlist.
     A signal found earlier can only make the answer stricter.
+
+    human_authority means the operator explicitly ordered this send in chat
+    (or approved its exact bytes). The human IS the authority then, so
+    standing, escalation and new-thread gates step aside — exactly like the
+    approval path, which revalidates kill switch, injection and hash but
+    never second-guesses the human's yes. The kill switch and the injection
+    filter still apply: no human order survives those, because neither can
+    be given by an attacker wearing the human's voice through a prompt.
     """
     addr = normalize_address(sender)
     signals: list[str] = []
 
-    # 1. Global kill switch.
+    # 1. Global kill switch. Nothing survives this — not allowlists, not
+    # Jev, not the human in chat. Off means off.
     if cfg.send_mode == "never":
         return Decision(False, "send_mode=never — agent may not send at all", "high", ["kill_switch"])
+
+    if human_authority:
+        # The operator ordered it. Standing, escalation, attachments and
+        # thread gates step aside; injection still kills it below.
+        inj = detect_injection(f"{subject}\n{body}")
+        if inj:
+            return Decision(False, f"prompt-injection signals in content: {len(inj)}",
+                            "high", ["injection"])
+        return Decision(True, "operator-ordered send, revalidated", "low", ["human_authority"])
 
     # 2. Never-auto-send list wins over everything, including the allowlist.
     if addr in {normalize_address(a) for a in cfg.never_auto_send}:
@@ -230,6 +249,7 @@ def explain(
     is_reply_to_unknown: bool = False,
     is_established_thread: bool = False,
     jev_confident_act: bool = False,
+    human_authority: bool = False,
 ) -> list[str]:
     """Every gate that fires, in order — not just the first one.
 
@@ -258,6 +278,8 @@ def explain(
     if not account_auto_send:
         out.append(f"auto-send is off for account '{account}'")
 
+    if human_authority:
+        out.append("operator-ordered — standing and escalation gates step aside")
     allowed = {normalize_address(a) for a in cfg.auto_send_contacts}
     if not (contact_auto_send or addr in allowed or is_established_thread or jev_confident_act):
         out.append(f"{addr} has not been approved for unattended replies")

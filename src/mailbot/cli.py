@@ -352,6 +352,30 @@ def cmd_contacts(args, cfg):
     return 0
 
 
+_daemon_lock_fd = None
+
+
+def hold_daemon_lock() -> bool:
+    """Exactly one daemon. Two pollers answering the same chat is how the
+    operator gets every reply twice — and a restart overlapping the old
+    process makes two pollers without anyone starting one. The lock file
+    lives in the data dir; a dead holder releases it via the OS, so a crash
+    can never wedge the next start."""
+    import fcntl
+
+    from .config import DATA_DIR
+
+    global _daemon_lock_fd
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        fd = open(DATA_DIR / "daemon.lock", "w")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _daemon_lock_fd = fd  # held for the life of the process
+        return True
+    except (OSError, BlockingIOError):
+        return False
+
+
 def cmd_daemon(args, cfg):
     """Always-on runtime.
 
@@ -361,6 +385,11 @@ def cmd_daemon(args, cfg):
     """
     from .agent.idle import IdleListener
     from .agent.supervisor import Supervisor
+
+    if not hold_daemon_lock():
+        print("Another mail-agent daemon already holds the lock — refusing to "
+              "start a second poller. Stop it first if this is wrong.")
+        return 1
 
     notifier = build_notifiers(cfg)
 
