@@ -503,6 +503,15 @@ class ToolBox:
 
     # ---------------------------------------------------------------- draft
     def _t_create_draft(self, a: dict[str, Any]) -> dict[str, Any]:
+        # Drafting a reply to a no-reply sender is busywork that reads as
+        # progress: the draft sits there, the user assumes it matters, and
+        # sending it would go nowhere. Refuse, loudly enough that the model
+        # stops trying.
+        dead = [x for x in (a.get("to") or []) if guards.is_noreply(str(x))]
+        if dead and len(dead) == len(a.get("to") or []):
+            return {"ok": False, "error":
+                    f"refusing to draft for no-reply sender(s): {', '.join(dead)} — "
+                    f"note the content instead, do not reply"}
         req = DraftRequest(
             to=a["to"], subject=a.get("subject", ""), body=a["body"],
             in_reply_to=a.get("in_reply_to"),
@@ -646,6 +655,15 @@ class ToolBox:
         # refuse on the inbound side.
         if guards.detect_injection(f"{subject}\n{body}"):
             return {"ok": False, "error": "outbound content tripped the injection filter; not sending"}
+
+        # No-reply recipients are refused before any gate runs. There is no
+        # approval that could make sending there sensible, so queueing would
+        # just manufacture work for the operator. Refuse, don't queue.
+        dead = [x for x in to_addrs if guards.is_noreply(x)]
+        if dead:
+            return {"ok": False, "error":
+                    f"refusing: {', '.join(dead[:3])} cannot receive replies "
+                    f"(no-reply sender) — noted, not queued, not sent"}
 
         # Per-recipient decision. Auto-send only if EVERY recipient is allowed.
         # Standing comes from _standing(), the same source the hook gate used

@@ -145,6 +145,13 @@ def decide(
     if addr in {normalize_address(a) for a in cfg.never_auto_send}:
         return Decision(False, f"{addr} is on the never-auto-send list", "high", ["never_list"])
 
+    # 2b. No-reply senders receive nothing. A reply there goes nowhere, so
+    # there is nothing to approve and nothing to queue — the message is
+    # reported, never answered.
+    if is_noreply(sender):
+        return Decision(False, f"{addr} is a no-reply sender — nothing to reply to",
+                        "medium", ["no_reply"])
+
     # 3. Per-account authority.
     if not account_auto_send:
         return Decision(False, f"auto-send is off for account '{account}'", "high", ["account_off"])
@@ -245,6 +252,9 @@ def explain(
     if addr in {normalize_address(a) for a in cfg.never_auto_send}:
         out.append(f"{addr} is on the never-auto-send list")
 
+    if is_noreply(sender):
+        out.append(f"{addr} is a no-reply sender — nothing to reply to")
+
     if not account_auto_send:
         out.append(f"auto-send is off for account '{account}'")
 
@@ -279,6 +289,18 @@ def explain(
         out.append("body too short to have been individually written")
 
     return out
+
+
+_NOREPLY_MARKERS = ("noreply", "no-reply", "donotreply", "do-not-reply",
+                    "mailer-daemon", "mail-daemon")
+
+
+def is_noreply(sender: str) -> bool:
+    """Does this address receive replies? A reply to a no-reply sender goes
+    nowhere — or worse, into an unmonitored automation. There is no version
+    of events where sending there or drafting for there is useful."""
+    s = (sender or "").lower()
+    return any(k in s for k in _NOREPLY_MARKERS)
 
 
 def can_calendar_write(action: str, cfg_calendar_enabled: bool) -> bool:

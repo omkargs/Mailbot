@@ -502,6 +502,132 @@ def test_unendorsed_stranger_still_queues(provider, cfg):
     assert provider.sent == [] and len(db.pending_approvals()) == 1
 
 
+def _v_from(ans, cfg=None):
+    from mailbot.agent import jev
+
+    return jev.interpret(ans, cfg or _cfg())
+
+
+def test_combine_agreement_takes_weaker_call():
+    from mailbot.agent import jev
+
+    a = _v_from(_ans("ACT", 0.9, probs=_act_probs(0.9, 0.05, 0.05)))
+    b = _v_from(_ans("ACT", 0.7, probs=_act_probs(0.7, 0.2, 0.1)))
+    out = jev.combine(a, b, _cfg())
+    assert out.verdict == "ACT"
+    assert out.confidence == 0.7 and abs(out.margin - 0.5) < 1e-9
+    assert "2/2 agree" in out.reason
+
+
+def test_combine_disagreement_holds():
+    from mailbot.agent import jev
+
+    a = _v_from(_ans("ACT", 0.9, probs=_act_probs(0.9, 0.05, 0.05)))
+    b = _v_from(_ans("ASK", 0.9))
+    out = jev.combine(a, b, _cfg())
+    assert out.verdict == "ASK" and "disagreed" in out.reason
+    assert out.auto_ok is False and out.margin == 0.0
+
+
+def test_combine_file_file_files():
+    from mailbot.agent import jev
+
+    a = _v_from(_ans("FILE", 0.95))
+    b = _v_from(_ans("FILE", 0.8))
+    out = jev.combine(a, b, _cfg())
+    assert out.verdict == "FILE" and out.confidence == 0.8
+
+
+def test_combine_keeps_strongest_urgency():
+    from mailbot.agent import jev
+
+    a = _v_from(_ans("ASK", 0.9, deadline=0))
+    b = _v_from(_ans("ASK", 0.9, deadline=3, importance="vip"))
+    out = jev.combine(a, b, _cfg())
+    assert out.is_urgent and out.is_vip
+
+
+def test_combine_endorsement_needs_both():
+    from mailbot.agent import jev
+
+    a = _v_from(_ans("ACT", 0.9, probs=_act_probs(0.9, 0.05, 0.05)))
+    b = _v_from(_ans("ACT", 0.9, probs=_act_probs(0.9, 0.05, 0.05)))
+    assert jev.combine(a, b, _cfg()).auto_ok is True
+    c = _v_from(_ans("ACT", 0.7, probs=_act_probs(0.7, 0.2, 0.1)))
+    assert jev.combine(a, c, _cfg()).auto_ok is False
+
+
+def test_decide_calls_twice(monkeypatch):
+    import requests
+
+    from mailbot.agent import jev
+
+    calls = []
+
+    class R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            calls.append(1)
+            return _ans("FILE", 0.95, importance="bulk", tier="skip")
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: R())
+    v = jev.decide({"sender": "news@list.com", "subject": "weekly",
+                    "body": "hello here is the news"}, _cfg())
+    assert v.verdict == "FILE" and len(calls) == 2
+    assert "2/2 agree" in v.reason
+
+
+def test_decide_second_failure_holds(monkeypatch):
+    import requests
+
+    from mailbot.agent import jev
+
+    n = {"i": 0}
+
+    class R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return _ans("ACT", 0.9, probs=_act_probs(0.9, 0.05, 0.05))
+
+    def flaky(*a, **k):
+        n["i"] += 1
+        if n["i"] == 2:
+            raise ConnectionError("blip")
+        return R()
+
+    monkeypatch.setattr(requests, "post", flaky)
+    v = jev.decide({"sender": "a@b.com", "subject": "hi",
+                    "body": "hello friend, confirming friday"}, _cfg())
+    assert v.verdict == "ASK" and "second jev call failed" in v.reason
+
+
+def test_decide_single_call_when_disabled(monkeypatch):
+    import requests
+
+    from mailbot.agent import jev
+
+    calls = []
+
+    class R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            calls.append(1)
+            return _ans("FILE", 0.95)
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: R())
+    c = _cfg()
+    c.jev.double_check = False
+    v = jev.decide({"sender": "news@list.com", "subject": "w",
+                    "body": "hello weekly news"}, c)
+    assert v.verdict == "FILE" and len(calls) == 1
+
+
 def test_filed_mail_gets_newsletter_label(provider, cfg, monkeypatch):
     import datetime as _dt
 

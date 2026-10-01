@@ -352,28 +352,130 @@ def state_for(mail: dict[str, Any]) -> str:
     )
 
 
-def decide(mail: dict[str, Any], cfg) -> JevVerdict:
-    """Ask Jev about one message. Never raises — failure is ASK."""
+def _ask_once(state: str, url: str, key: str, model: str, timeout: int) -> dict:
+    """One System-One call. Raises on any failure — the caller decides."""
     import requests
 
+    r = requests.post(
+        f"{url}/v1/systemone",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"model": model, "state": state[:4000], "questions": QUESTIONS},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def combine(first: JevVerdict, second: JevVerdict, cfg) -> JevVerdict:
+    """Merge two independent judgments on the same mail. Pure and testable.
+
+    Agreement strengthens: confidence and margin take the weaker of the two,
+    so one bullish call cannot launder a doubtful one. Any disagreement on
+    the action holds the message — two deciders that cannot agree are the
+    definition of "needs the human". The merged verdict keeps the strongest
+    urgency and need signals from either call, because dropping a VIP flag
+    or a deadline one call saw would be losing information to consensus.
+    """
+    if first.verdict == second.verdict:
+        out = JevVerdict(
+            verdict=first.verdict,
+            confidence=min(first.confidence, second.confidence),
+            needs_user=max(first.needs_user, second.needs_user),
+            sensitivity=max(first.sensitivity, second.sensitivity),
+            is_cold=max(first.is_cold, second.is_cold),
+            needs_reply=max(first.needs_reply, second.needs_reply),
+            deadline=max(first.deadline, second.deadline),
+            importance="vip" if "vip" in (first.importance, second.importance)
+            else first.importance,
+            draft_tier=("flagship" if "flagship" in (first.draft_tier, second.draft_tier)
+                        else first.draft_tier),
+            p_act=min(first.p_act, second.p_act),
+            p_ask=max(first.p_ask, second.p_ask),
+            margin=min(first.margin, second.margin),
+            money=max(first.money, second.money),
+            commitment=max(first.commitment, second.commitment),
+            emotion=max(first.emotion, second.emotion),
+            knows_user=max(first.knows_user, second.knows_user),
+            thread_continuation=(first.thread_continuation
+                                 if first.thread_continuation == second.thread_continuation
+                                 else "new"),
+            reply_shape=(first.reply_shape
+                         if first.reply_shape == second.reply_shape else "full"),
+            deadline_p3=max(first.deadline_p3, second.deadline_p3),
+            reason=f"{first.reason} (2/2 agree)",
+            raw=first.raw,
+        )
+        # Endorsement needs both calls independently consequence-free.
+        out.auto_ok = bool(first.auto_ok and second.auto_ok)
+        return out
+    out = JevVerdict(
+        verdict=ASK,
+        confidence=min(first.confidence, second.confidence),
+        needs_user=max(first.needs_user, second.needs_user),
+        sensitivity=max(first.sensitivity, second.sensitivity),
+        is_cold=max(first.is_cold, second.is_cold),
+        needs_reply=max(first.needs_reply, second.needs_reply),
+        deadline=max(first.deadline, second.deadline),
+        importance="vip" if "vip" in (first.importance, second.importance)
+        else "normal",
+        draft_tier="flagship",
+        p_act=(first.p_act + second.p_act) / 2,
+        p_ask=(first.p_ask + second.p_ask) / 2,
+        margin=0.0,
+        money=max(first.money, second.money),
+        commitment=max(first.commitment, second.commitment),
+        emotion=max(first.emotion, second.emotion),
+        knows_user=max(first.knows_user, second.knows_user),
+        thread_continuation="new",
+        reply_shape="full",
+        deadline_p3=max(first.deadline_p3, second.deadline_p3),
+        reason=f"jev disagreed ({first.verdict} vs {second.verdict}) — held",
+        raw=first.raw,
+    )
+    out.auto_ok = False
+    return out
+
+
+def decide(mail: dict[str, Any], cfg) -> JevVerdict:
+    """Ask Jev about one message — twice, independently. Never raises.
+
+    Double verification: two calls, two judgments, one verdict. Agreement
+    strengthens (at the weaker call's confidence); disagreement holds the
+    mail. A single stochastic judgment is an opinion; two that agree are
+    evidence. Disable with JEV_DOUBLE_CHECK=0, at the cost of exactly the
+    safety this exists for.
+    """
     url, key, model = cfg.jev.endpoint(cfg.router)
     if not (url and key):
         return JevVerdict(ASK, 0.0, reason="jev not configured")
+    state = state_for(mail)
     try:
-        r = requests.post(
-            f"{url}/v1/systemone",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": model, "state": state_for(mail)[:4000],
-                  "questions": QUESTIONS},
-            timeout=cfg.jev.timeout,
-        )
-        r.raise_for_status()
-        return interpret(r.json(), cfg)
+        first = interpret(_ask_once(state, url, key, model, cfg.jev.timeout), cfg)
     except Exception as e:
         # Fail closed. A decider that cannot be reached must not become a
         # decider that files everything.
         log.warning("jev failed (%s); holding for the user", type(e).__name__)
         return JevVerdict(ASK, 0.0, reason=f"jev unavailable: {type(e).__name__}")
+    if not getattr(cfg.jev, "double_check", True):
+        return first
+    try:
+        second = interpret(_ask_once(state, url, key, model, cfg.jev.timeout), cfg)
+    except Exception as e:
+        # One good judgment plus one failure is not verification. The first
+        # call may still be right, but "may" is not the standard — hold it,
+        # and say which half failed.
+        log.warning("jev second call failed (%s); holding for the user", type(e).__name__)
+        out = JevVerdict(ASK, first.confidence, needs_user=first.needs_user,
+                         sensitivity=first.sensitivity, is_cold=first.is_cold,
+                         needs_reply=first.needs_reply, deadline=first.deadline,
+                         importance=first.importance, draft_tier="flagship",
+                         p_act=first.p_act, p_ask=first.p_ask, margin=0.0,
+                         money=first.money, commitment=first.commitment,
+                         emotion=first.emotion, knows_user=first.knows_user,
+                         reason=f"second jev call failed ({type(e).__name__}) — held")
+        out.auto_ok = False
+        return out
+    return combine(first, second, cfg)
 
 
 def enabled(cfg) -> bool:

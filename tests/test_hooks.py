@@ -154,6 +154,60 @@ def test_toolbox_send_with_injection_never_queues(provider, cfg):
     assert provider.sent == []
 
 
+def test_noreply_variants_detected():
+    from mailbot.agent.guards import is_noreply
+
+    for s in ("noreply@x.com", "no-reply@x.com", "donotreply@x.com",
+              "do-not-reply@x.com", "mailer-daemon@x.com",
+              "NOREPLY@BANK.COM"):
+        assert is_noreply(s), s
+    for s in ("boss@corp.com", "friend@gmail.com", "notifications@x.com"):
+        assert not is_noreply(s), s
+
+
+def test_noreply_send_held_even_allowlisted(cfg):
+    from mailbot.agent import guards
+
+    d = guards.decide(
+        sender="noreply@bank.com", subject="statement ready",
+        body="hello friend, your monthly statement is ready for review",
+        account="google", cfg=cfg.agent, account_auto_send=True,
+        contact_auto_send=True)
+    assert not d.allowed and "no-reply" in d.reason
+
+
+def test_noreply_send_never_queues(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    box = ToolBox(provider, cfg, run_id=1)
+    out = box.run("send_message", {"to": ["noreply@bank.com"], "subject": "thanks",
+                                   "body": "hello friend, thanks for the statement"})
+    assert out["ok"] is False and "no-reply" in out["error"]
+    assert provider.sent == [] and db.pending_approvals() == []
+
+
+def test_noreply_draft_refused(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+
+    box = ToolBox(provider, cfg, run_id=1)
+    out = box.run("create_draft", {"to": ["noreply@bank.com"], "subject": "re",
+                                   "body": "hello friend, thanks for writing"})
+    assert out["ok"] is False and "no-reply" in out["error"]
+    assert provider.drafted == []
+
+
+def test_explain_names_no_reply(cfg):
+    from mailbot.agent import guards
+
+    out = guards.explain(
+        sender="donotreply@x.com", subject="s",
+        body="hello friend, here is your weekly update",
+        account="google", cfg=cfg.agent, account_auto_send=True)
+    assert any("no-reply" in line for line in out)
+
+
 def test_toolbox_queued_send_carries_hash(provider, cfg):
     from mailbot.agent.tools import ToolBox
     from mailbot.storage import db

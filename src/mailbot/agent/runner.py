@@ -177,6 +177,9 @@ def run_once(
             ctx.append(guards.fence(
                 f"from: {m['sender']}  date: {m.get('date', '')}\n"
                 f"subject: {m.get('subject', '')[:120]}", "headers"))
+            if guards.is_noreply(m.get("sender", "")):
+                ctx.append("no-reply sender: do not draft a reply and do not "
+                           "send one — note what it says only if it matters.")
             if "_triage" in m:
                 ctx.append(f"triage: {m['_triage'].get('v', 'human')} — {m['_triage'].get('why', '')}")
             v = m.get("_jev")

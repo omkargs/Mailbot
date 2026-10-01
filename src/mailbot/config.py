@@ -144,6 +144,9 @@ class JevConfig:
     # Autonomy endorsement: the bar for a verdict that may send by itself.
     act_p: float = field(default_factory=lambda: float(_v("JEV_ACT_P", "0.8")))
     auto_margin: float = field(default_factory=lambda: float(_v("JEV_AUTO_MARGIN", "0.2")))
+    # Two independent judgments per mail, combined (agreement strengthens at
+    # the weaker call; disagreement holds). Off means one call per mail.
+    double_check: bool = field(default_factory=lambda: _v("JEV_DOUBLE_CHECK", "1") != "0")
     timeout: int = field(default_factory=lambda: int(_v("JEV_TIMEOUT", "20")))
 
     def endpoint(self, router: "RouterConfig") -> tuple[str, str, str]:
