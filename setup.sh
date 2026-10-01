@@ -455,9 +455,15 @@ setkv "ROUTER_API_KEY" "$k"
 hdr "Google (Gmail + Calendar)"
 if ask_yn "Set up a Google account?" y; then
   creds="$CONFIG_DIR/google-credentials.json"
-  say "${DIM}Download an OAuth Desktop client from:"
-say "  https://console.cloud.google.com/apis/credentials"
-say "  Client ID → Download JSON, then give the path here."
+  say "${DIM}OAuth client (5 min, once):"
+say "  1. https://console.cloud.google.com/apis/credentials (project: any name)"
+say "  2. Enable Gmail + Calendar APIs:"
+say "     https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+say "     https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"
+say "  3. OAuth consent → External → add yourself as test user:"
+say "     https://console.cloud.google.com/apis/credentials/consent"
+say "  4. Credentials → OAuth client ID → Desktop app → Download JSON."
+say "  Then give the path here."
   src="$(ask_plain 'Path to credentials JSON' "$creds")"
   if [ -f "$src" ]; then
     cp -f "$src" "$creds"; chmod 600 "$creds"
@@ -472,6 +478,21 @@ say "  Client ID → Download JSON, then give the path here."
     ok "google configured"
   else
     warn "no file at $src — skipping Google"
+  fi
+  say "${DIM}Push (wake on new mail, no polling):"
+  say "  1. https://myaccount.google.com/apppasswords (needs 2-Step Verification ON)"
+  say "  2. Name it 'mailbot' → Generate → paste the 16 letters here."
+  imap="$(ask_secret 'Gmail App Password (empty skips push)')"
+  imap="${imap// /}"
+  if [ -n "$imap" ]; then
+    if [ "${#imap}" -ne 16 ]; then
+      warn "that is ${#imap} characters; app passwords are 16 — not saved (re-run setup.sh to retry)"
+    else
+      setkv "GOOGLE_IMAP_PASSWORD" "$imap"
+      ok "push configured — new mail wakes the agent"
+    fi
+  else
+    say "${DIM}no push — interval polling covers you${RST}"
   fi
 fi
 

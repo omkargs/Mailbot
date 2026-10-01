@@ -100,6 +100,9 @@ class Supervisor:
         self.notify = notify
         self.health = HealthState()
         self.idle = None  # IdleListener, when push is configured (see cli.cmd_daemon)
+        # Set when the sleep ended early on an IDLE poke. The main loop scans
+        # on it — this is how push turns into action within a second.
+        self.woke = False
         self._stop = threading.Event()
         # Set by IMAP IDLE when new mail arrives. The loop's sleep returns
         # early on it, turning a 5-minute poll into sub-second detection.
@@ -238,10 +241,11 @@ class Supervisor:
             remaining = deadline - time.time()
             if remaining <= 0:
                 return False
-            # Wake early if IDLE signalled, but keep the wake set for the
-            # scan_fn that follows.
+            # Wake early if IDLE signalled, and remember it: the main loop
+            # scans on a wake even when interval scans are stood down.
             if self.wake.wait(timeout=min(remaining, 1.0)):
                 self.wake.clear()
+                self.woke = True
                 return False
             if self._stop.is_set():
                 return True
@@ -298,13 +302,23 @@ class Supervisor:
             if text:
                 self._say(f"*Scheduled — {job['kind']}*\n\n{text}")
 
+    # While push is healthy the interval scan stands down: IDLE wakes the
+    # loop the second mail arrives, so re-reading the inbox every minute is
+    # pure API spend for zero new information. The backstop stays — a scan
+    # at least this often, so a silently-dead push can only delay mail, not
+    # lose it. Scheduled jobs still fire on the fast cadence regardless.
+    IDLE_BACKSTOP_SEC = 1800
+
     def _main_loop(self, base_interval: float) -> int:
         while not self.should_stop():
             try:
                 providers = self.providers_factory()
                 self._check_auth(providers)
 
-                if providers:
+                idle_ok = bool(self.idle is not None and self.idle.connected)
+                stale = (time.time() - (self.health.last_scan or 0)) > self.IDLE_BACKSTOP_SEC
+                woke, self.woke = self.woke, False
+                if providers and (not idle_ok or stale or woke):
                     self.scan_fn()
                 # tick_fn (approvals + chat) runs in _chat_loop on its own fast
                 # cadence. Calling it here too would give the channel two
@@ -432,8 +446,13 @@ class Supervisor:
         """Detects a wedged or silently-dying loop."""
         while not self.should_stop():
             last = self.health.last_scan or self.health.started_at
-            # Two missed cycles means the loop is stuck, not busy.
-            threshold = max(300, self.cfg.agent.scan_interval_sec * 2)
+            # Two missed cycles means the loop is stuck, not busy. While push
+            # is healthy the interval scan stands down by design, so the
+            # watchdog must not mistake a stood-down scanner for a wedged one.
+            if self.idle is not None and self.idle.connected:
+                threshold = self.IDLE_BACKSTOP_SEC + 600
+            else:
+                threshold = max(300, self.cfg.agent.scan_interval_sec * 2)
             if time.time() - last > threshold and self.health.cycles > 0:
                 log.error("no scan in %ds (threshold %ds) — loop may be wedged",
                           int(time.time() - last), threshold)

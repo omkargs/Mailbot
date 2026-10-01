@@ -1062,9 +1062,13 @@ def cmd_setup(args, cfg) -> int:
             print("    Mailbot needs a Google OAuth client so it can read YOUR")
             print("    mailbox with YOUR consent. 5 minutes, once:")
             print("    1. Open  https://console.cloud.google.com/apis/credentials")
+            print("       (create/sign into a Google Cloud project first if it asks)")
             print("    2. Create a project (any name, e.g. mailbot)")
             print("    3. Enable the Gmail API + the Calendar API")
-            print("       (APIs & Services → Library → search → Enable)")
+            print("       (APIs & Services → Library → search each → Enable)")
+            print("       Direct links if search fights you:")
+            print("         https://console.cloud.google.com/apis/library/gmail.googleapis.com")
+            print("         https://console.cloud.google.com/apis/library/calendar-json.googleapis.com")
             print("    4. OAuth consent screen → External → fill name + email →")
             print("       add yourself as a test user")
             print("       https://console.cloud.google.com/apis/credentials/consent")
@@ -1118,10 +1122,14 @@ def cmd_setup(args, cfg) -> int:
         elif not _tty():
             state.setdefault("push", "skipped")
         else:
-            print("  Gmail → Google Account → Security → 2-Step Verification →")
-            print("  App passwords → create one named 'mailbot' → paste it.")
+            print("  Two-minute setup, once:")
+            print("  1. Open  https://myaccount.google.com/apppasswords")
+            print("     (sign in; needs 2-Step Verification ON — it will tell")
+            print("      you if it isn't, and turning it on is one toggle)")
+            print("  2. Name it 'mailbot' → Generate → copy the 16 letters.")
+            print("  3. Paste below. Spaces don't matter; I strip them.")
             print("  New mail then wakes the agent in seconds. Without it the")
-            print("  agent polls every few minutes instead — slower, same bills.")
+            print("  agent polls on an interval instead — slower, same bills.")
             try:
                 pw = input("  App password (empty skips push): ").strip().replace(" ", "")
             except (EOFError, KeyboardInterrupt, OSError):
