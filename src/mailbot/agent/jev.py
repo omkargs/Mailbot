@@ -374,13 +374,21 @@ def interpret(resp: dict, cfg) -> JevVerdict:
 
 
 def state_for(mail: dict[str, Any]) -> str:
-    """The text Jev judges. Headers plus a body slice, nothing else."""
+    """The text Jev judges. Headers plus a body slice, nothing else —
+    plus the Gmail tab, when it has one. A Promotions placement is prior
+    knowledge no model should have to re-derive from the prose."""
+    from . import guards
+
     body = (mail.get("body") or mail.get("snippet") or "").strip()
-    return (
-        f"From: {mail.get('sender', '')}\n"
-        f"Subject: {mail.get('subject', '')}\n\n"
-        f"{body[:2000]}"
-    )
+    tab = guards.message_tab(mail.get("label_ids"))
+    lines = [
+        f"From: {mail.get('sender', '')}",
+        f"Subject: {mail.get('subject', '')}",
+    ]
+    if tab:
+        lines.append(f"Gmail tab: {tab}")
+    lines += ["", body[:2000]]
+    return "\n".join(lines)
 
 
 def _ask_once(state: str, url: str, key: str, model: str, timeout: int) -> dict:
@@ -513,6 +521,31 @@ def enabled(cfg) -> bool:
     return bool(getattr(cfg.jev, "enabled", False)) and cfg.jev.configured(cfg.router)
 
 
+def _reportable_as_spam(m: dict[str, Any], body: str, provider) -> bool:
+    """May this FILE verdict become a spam report instead of an archive?
+
+    All three must hold: bulk-shaped, stranger sender, cold-outreach
+    template. Transactional mail (alerts, codes, receipts) fails the bulk
+    test by design; anyone the user knows fails the stranger test. When in
+    doubt this returns False and the mail archives — reporting is the one
+    filing action that teaches Gmail, so its bar is the highest.
+    """
+    from . import guards
+    from ..storage import db
+
+    if not guards.is_bulk(m.get("label_ids"), body, m.get("sender", ""),
+                          m.get("subject", "")):
+        return False
+    try:
+        contact = db.get_contact(provider.account, m.get("sender", ""))
+    except Exception:
+        return False
+    if contact and (contact.get("sent_count") or contact.get("received_count")
+                    or contact.get("auto_send_ok")):
+        return False
+    return bool(guards.detect_cold(body))
+
+
 def prune(
     messages: list[dict[str, Any]],
     verdicts: dict[str, JevVerdict],
@@ -564,6 +597,22 @@ def prune(
             remaining.append(m)
             continue
 
+        body = m.get("body") or m.get("snippet") or ""
+        if _reportable_as_spam(m, body, provider):
+            # Cold outreach sequences and unsolicited promos from strangers:
+            # archiving hides them, reporting trains Gmail. Established
+            # contacts, solicited lists and transactional mail never land
+            # here — _reportable_as_spam excludes all three.
+            try:
+                if provider.report_spam(m["id"]):
+                    box.stats["triaged"] += 1
+                    db.log_action("spam_report", provider.account, m["id"],
+                                  detail=f"jev:file cold-bulk ({v.confidence:.2f})")
+                    db.mark_processed(m["id"], getattr(provider, "account", ""))
+                    archived += 1
+                    continue
+            except Exception as e:
+                log.warning("spam report failed for %s: %s", m["id"], type(e).__name__)
         try:
             if provider.archive(m["id"]):
                 box.stats["triaged"] += 1

@@ -109,6 +109,14 @@ class MailProvider(abc.ABC):
     def archive(self, message_id: str) -> bool:
         ...
 
+    def report_spam(self, message_id: str) -> bool:
+        """Move a message to Spam. Trains the provider's filters, unlike
+        archiving — use it for real junk, never for mail the user solicited.
+        Default False: a provider without a spam endpoint refuses loudly
+        rather than pretending it reported.
+        """
+        return False
+
     @abc.abstractmethod
     def create_label(self, name: str) -> str | None:
         """Returns the label id, or None if it already existed / cannot be created."""

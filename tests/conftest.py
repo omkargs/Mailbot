@@ -79,6 +79,7 @@ class FakeProvider:
         self.events: list[dict] = []
         self.inbox: list[dict] = []
         self.applied: list[dict] = []
+        self.spam_reported: list[str] = []
         self.get_messages_calls: list[list[str]] = []
         self._next = 1
         MailProvider.register(FakeProvider)
@@ -107,6 +108,8 @@ class FakeProvider:
         # Honour the first-run window the way a real provider would, so the
         # tests exercise the same path production does.
         out = list(self.inbox)
+        if str(folder).upper() == "SPAM":
+            out = [m for m in out if "SPAM" in [str(x).upper() for x in m.get("label_ids", [])]]
         if newer_than_days and not after_id:
             import datetime as _dt
             cut = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=newer_than_days)
@@ -128,6 +131,9 @@ class FakeProvider:
         return self.inbox[:limit]
     def apply_label(self, message_id, label_id, add=True):
         self.applied.append({"message_id": message_id, "label_id": label_id, "add": add})
+        return True
+    def report_spam(self, message_id):
+        self.spam_reported.append(message_id)
         return True
     def mark_read(self, message_id, read=True): return True
     def archive(self, message_id): return True

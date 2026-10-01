@@ -294,6 +294,31 @@ def explain(
 _NOREPLY_MARKERS = ("noreply", "no-reply", "donotreply", "do-not-reply",
                     "mailer-daemon", "mail-daemon")
 
+# Gmail's category tabs, as they arrive in labelIds. Promotions/Social mail
+# is solicited-but-unwanted by default: file first, ask never — unless
+# something in it is personally addressed, which the decider still sees.
+TAB_LABELS = {
+    "CATEGORY_PROMOTIONS": "Promotions",
+    "CATEGORY_SOCIAL": "Social",
+    "CATEGORY_UPDATES": "Updates",
+    "CATEGORY_FORUMS": "Forums",
+    "CATEGORY_PERSONAL": "Primary",
+}
+
+UNSUB_PATTERNS = [
+    r"list-unsubscribe", r"unsubscribe", r"opt.?out",
+    r"manage (your )?preferences", r"email preferences", r"stop receiving",
+]
+
+# Cold-outreach tells: stranger + sales template. One signal means nothing
+# (real people book calls); three together with no relationship is a sequence.
+COLD_SIGNALS = [
+    r"unsubscribe", r"opt.?out", r"quick call\??", r"15 ?min(ute)? chat",
+    r"book a (call|demo|meeting)", r"free trial", r"limited.?time offer",
+    r"grow your (business|revenue|pipeline)", r"we help .* companies",
+    r"just bumping", r"just following up", r"circle back",
+]
+
 
 def is_noreply(sender: str) -> bool:
     """Does this address receive replies? A reply to a no-reply sender goes
@@ -301,6 +326,64 @@ def is_noreply(sender: str) -> bool:
     of events where sending there or drafting for there is useful."""
     s = (sender or "").lower()
     return any(k in s for k in _NOREPLY_MARKERS)
+
+
+def message_tab(label_ids: list[str] | None) -> str | None:
+    """Which Gmail tab this arrived on, if any. None = Primary/unknown."""
+    for lid in label_ids or []:
+        if str(lid) in TAB_LABELS and str(lid) != "CATEGORY_PERSONAL":
+            return TAB_LABELS[str(lid)]
+    return None
+
+
+def find_unsub_links(body: str) -> list[str]:
+    """Pull unsubscribe exits out of a body. Empty = no clean exit.
+
+    Checks URLs first (real one-click exits), then falls back to a plain
+    reply hint when the words are there but no link is.
+    """
+    urls = re.findall(r"https?://[^\s\"'<>]+", body or "")
+    out = [u for u in urls if re.search(r"unsub|opt.?out|preferences|optout", u, re.I)]
+    if not out and re.search(r"unsubscribe|opt.?out", body or "", re.I):
+        out = ["reply UNSUBSCRIBE (no link found)"]
+    return out[:3]
+
+
+def detect_cold(body: str) -> list[str]:
+    """Sales-template tells in the body. The caller decides what stranger +
+    template means; this only reports the template half, no more."""
+    low = (body or "").lower()
+    return [p for p in COLD_SIGNALS if re.search(p, low)]
+
+
+# Transactional mail wears bulk's clothes (no-reply sender, templated body)
+# but is exactly what must never be reported as spam: security alerts,
+# verification codes, receipts. These words veto the bulk judgment.
+_TRANSACTIONAL = re.compile(
+    r"security alert|verification code|verify your|one-time|receipt|invoice|"
+    r"statement|password (reset|changed)|sign-?in (alert|attempt)|2-step|"
+    r"multi-factor|account (locked|compromised)",
+    re.I,
+)
+
+
+def is_bulk(label_ids: list[str] | None, body: str, sender: str = "",
+            subject: str = "") -> bool:
+    """Solicited-or-not bulk: a tab placement, an exit link, or list
+    headers. Personal mail has none of these; newsletters have at least one.
+    Transactional mail (alerts, codes, receipts) is never bulk no matter how
+    templated it looks — misclassifying that direction loses money or access.
+    """
+    hay = f"{subject}\n{body}"
+    if _TRANSACTIONAL.search(hay):
+        return False
+    if message_tab(label_ids) in ("Promotions", "Social", "Updates", "Forums"):
+        return True
+    if find_unsub_links(body):
+        return True
+    if is_noreply(sender) and message_tab(label_ids) is None:
+        return True
+    return False
 
 
 def can_calendar_write(action: str, cfg_calendar_enabled: bool) -> bool:

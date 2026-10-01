@@ -637,6 +637,19 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
     if res.get("status") == "ok":
         advance_cursor(provider, [m["id"] for m in new])
 
+    # Spam-folder review, once a day: Gmail's filter is good, not perfect,
+    # and a verification code or a real reply sitting in Spam is the kind of
+    # miss nothing else catches. Surface-only — nothing is ever moved out of
+    # Spam automatically, because un-spamming junk trains the filter wrong.
+    spam_note = None
+    try:
+        found = review_spam_folder(provider)
+        if found:
+            spam_note = ("Caught in Spam, might be real:\n" +
+                         "\n".join(f"• {line}" for line in found[:8]))
+    except Exception as e:
+        log.debug("spam review failed: %s", type(e).__name__)
+
     # LEARN runs once per scan, not once per send: diffing abandoned drafts
     # against the user's own sent replies costs a thread fetch each, so it is
     # bounded — and it must never break the scan that hosts it.
@@ -650,6 +663,11 @@ def scan(provider: MailProvider, cfg: Config, notify=None, model: str | None = N
     # Report the outcome. Sends already notified themselves; without this the
     # operator hears nothing at all when the agent escalated something, which
     # is exactly the moment they most need to know.
+    if spam_note and notify:
+        from ..profiles import header_for as _header_for2
+
+        _tag2 = _header_for2(profile, provider.address if hasattr(provider, "address") else "")
+        notify(f"{_tag2} {spam_note}" if _tag2 else spam_note)
     if voice_tip and notify:
         from ..profiles import header_for as _header_for
 
@@ -918,6 +936,53 @@ def harvest_voice_samples(account: str, provider: MailProvider, limit: int = 10)
         if age is not None and age > 7:
             db.mark_draft_harvested(d["id"], account)
     return learned
+
+
+def review_spam_folder(provider: MailProvider, limit: int = 10) -> list[str]:
+    """Anything in Spam that looks like real mail. Once a day at most.
+
+    The filter catches what it catches; the misses are all one-directional
+    (real mail in Spam) and all cheap to list. Each hit is one line —
+    sender, subject, why it looks real — for the operator to glance at, not
+    a card per message. Nothing moves: un-spamming is the operator's tap.
+    """
+    from datetime import date as _date
+
+    from . import guards
+
+    if not db.claim_surfaced(provider.account, f"spam-review-{_date.today().isoformat()}",
+                             "spam_review", "daily spam-folder check"):
+        return []
+    try:
+        refs = provider.list_messages(folder="SPAM", limit=limit)
+    except Exception:
+        return []
+    ids = [m["id"] for m in refs if m.get("id")][:limit]
+    if not ids:
+        return []
+    try:
+        fulls = provider.get_messages(ids)
+    except Exception:
+        fulls = []
+    by_id = {m["id"]: m for m in fulls}
+    out = []
+    for ref in refs:
+        m = by_id.get(ref["id"], ref)
+        sender = m.get("sender", "")
+        subject = m.get("subject", "") or "(no subject)"
+        body = m.get("body") or m.get("snippet") or ""
+        labels = m.get("label_ids", [])
+        try:
+            contact = db.get_contact(provider.account, sender)
+        except Exception:
+            contact = None
+        established = bool(contact and contact.get("sent_count") and contact.get("received_count"))
+        if established or (contact and contact.get("auto_send_ok")):
+            out.append(f"{sender} — {subject[:70]} (you know them)")
+            continue
+        if not guards.is_bulk(labels, body, sender, subject) and not guards.detect_cold(body):
+            out.append(f"{sender} — {subject[:70]} (not bulk-shaped)")
+    return out
 
 
 def _is_newer(date_str: str, created_at: str) -> bool:

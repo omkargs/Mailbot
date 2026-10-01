@@ -145,6 +145,73 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             return f"Could not: {res.get('error', 'unknown')}"
         return "Sent." if res.get("sent") else "Discarded."
 
+    # ---------------------------------------------------------------- unsub
+    def unsub(target: str) -> str:
+        """Leave a sender: archive everything from them, show the exits.
+
+        For legit lists you never read. The archive is the enforcement (their
+        mail stops surfacing); the links are the cure (stop it at the source).
+        Refuses anyone you know — unsubscribing from your boss is not a
+        feature, it is an incident.
+        """
+        from ..agent import guards as _guards
+
+        target = (target or "").strip().strip("`").lower()
+        if not target:
+            return "Usage: /unsub <sender> — archives their mail, shows exit links."
+        provs = _providers()
+        if not provs:
+            return "No account connected."
+        p = next(iter(provs.values()))
+        contact = db.get_contact(p.account, target)
+        if contact and (contact.get("sent_count") or contact.get("auto_send_ok")):
+            return (f"{target} looks like someone you know "
+                    f"(sent={contact.get('sent_count', 0)}). Not touching them — "
+                    f"say which address you meant if I'm wrong.")
+        try:
+            found = p.search(query=f"from:{target}", limit=50)
+        except Exception as e:
+            return f"Could not search: {type(e).__name__}"
+        n = 0
+        links: list[str] = []
+        for m in found:
+            mid = m.get("id", "")
+            if not mid:
+                continue
+            try:
+                if p.archive(mid):
+                    n += 1
+            except Exception:
+                continue
+            if n == 1:
+                try:
+                    full = p.get_message(mid) or {}
+                    links = _guards.find_unsub_links(full.get("body") or m.get("body", ""))
+                except Exception:
+                    pass
+        db.log_action("unsub", p.account, target, detail=f"archived {n}")
+        out = f"Purged {n} from {target}."
+        out += "\nExit: " + (" | ".join(links) if links else "no link found — use Gmail's unsubscribe")
+        return out
+
+    def spam(message_id: str) -> str:
+        """Report one message as spam. For the junk in front of you right
+        now — the automatic rule handles the rest without being asked."""
+        from .tools import ToolBox
+
+        message_id = (message_id or "").strip().strip("`")
+        if not message_id:
+            return "Usage: /spam <message-id> — or let the scan rule handle bulk."
+        provs = _providers()
+        if not provs:
+            return "No account connected."
+        p = next(iter(provs.values()))
+        box = ToolBox(p, cfg, run_id=0, notify=notify)
+        out = box.run("report_spam", {"message_id": message_id})
+        if out.get("ok"):
+            return f"Reported as spam. Gmail learns from this."
+        return f"Did not report: {out.get('error', 'unknown reason')}"
+
     def show(approval_id: str) -> str:
         """The full text of a queued item. Cards carry excerpts; approvals
         should never be granted on an excerpt, so the whole thing is one
@@ -509,6 +576,8 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         "approve": approve,
         "approve_all": approve_all,
         "show": show,
+        "unsub": unsub,
+        "spam": spam,
         "jev": jev,
         "security": security,
         "brain": brain,

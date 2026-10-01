@@ -182,7 +182,7 @@ splash() {
       break
     fi
   done
-  printf '\n\n%s\n' "${DIM}The inbox colleague that acts. MIT, yours.${RST}"
+  printf '\n\n%s\n' "${DIM}The colleague that acts — every competitor just drafts.${RST}"
   return 0
 }
 

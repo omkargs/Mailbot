@@ -669,6 +669,143 @@ def test_card_has_no_numbers(provider):
     assert "agree" not in sent[0]
 
 
+def test_tab_names_resolve():
+    from mailbot.agent.guards import message_tab
+
+    assert message_tab(["INBOX", "CATEGORY_PROMOTIONS"]) == "Promotions"
+    assert message_tab(["INBOX", "CATEGORY_SOCIAL"]) == "Social"
+    assert message_tab(["INBOX"]) is None
+    assert message_tab([]) is None
+
+
+def test_unsub_links_found_or_honest():
+    from mailbot.agent.guards import find_unsub_links
+
+    assert find_unsub_links("click https://x.com/unsubscribe?u=1 here") == [
+        "https://x.com/unsubscribe?u=1"]
+    assert find_unsub_links("to stop receiving, reply UNSUBSCRIBE") == [
+        "reply UNSUBSCRIBE (no link found)"]
+    assert find_unsub_links("hello friend, see you friday") == []
+
+
+def test_transactional_is_never_bulk():
+    from mailbot.agent.guards import is_bulk
+
+    assert is_bulk([], "your security alert: new sign-in", "no-reply@x.com",
+                   "Security alert") is False
+    assert is_bulk([], "code 635823 is your verification code", "noreply@x.com",
+                   "verification") is False
+    assert is_bulk(["CATEGORY_PROMOTIONS"], "sale ends sunday", "news@shop.com",
+                   "big sale") is True
+    assert is_bulk([], "news! unsub here https://x.com/unsub", "news@x.com",
+                   "weekly") is True
+
+
+def test_cold_outreach_filed_as_spam_not_archived(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("FILE", 0.95), c))
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(
+        sender="growth@sequence.io", subject="quick call?",
+        body=("hello friend, just bumping this to the top of your inbox. "
+              "we help saas companies grow pipeline. book a call here, "
+              "or unsubscribe any time friend"),
+        date=now, label_ids=["INBOX"])
+    R.scan(provider, cfg, notify=lambda t, approval_id="": None)
+    assert provider.spam_reported, "cold bulk FILE must report, not archive"
+    assert len(provider.spam_reported) == 1
+
+
+def test_established_contact_never_reported(provider, cfg, monkeypatch):
+    import datetime as _dt
+
+    import mailbot.agent.runner as R
+    from mailbot.agent import jev as J
+    from mailbot.storage import db
+
+    cfg.jev.enabled = True
+    monkeypatch.setattr(J, "decide",
+                        lambda mail, c: J.interpret(_ans("FILE", 0.95), c))
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "news@known.com", sent=True, received=True)
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    provider.add_message(
+        sender="news@known.com", subject="weekly deals",
+        body=("hello friend, just bumping our weekly deals. unsubscribe "
+              "any time friend"),
+        date=now, label_ids=["INBOX"])
+    R.scan(provider, cfg, notify=lambda t, approval_id="": None)
+    assert provider.spam_reported == []
+
+
+def test_report_spam_tool_refuses_the_known(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "friend@x.com", sent=True, received=True)
+    provider.add_message(sender="friend@x.com", subject="hi",
+                         body="hello friend, confirming friday works")
+    mid = provider.inbox[0]["id"]
+    db.upsert_message(dict(provider.inbox[0]))
+    box = ToolBox(provider, cfg, run_id=1)
+    out = box.run("report_spam", {"message_id": mid})
+    assert out["ok"] is False and "know" in out["error"]
+    assert provider.spam_reported == []
+
+
+def test_spam_review_surfaces_the_real(provider, cfg):
+    import mailbot.agent.runner as R
+    from mailbot.storage import db
+
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "boss@corp.com", sent=True, received=True)
+    provider.add_message(sender="boss@corp.com", subject="call now",
+                         body="hello friend, please call me back today",
+                         label_ids=["INBOX", "SPAM"])
+    provider.add_message(sender="junk@blaster.io", subject="FREE pills",
+                         body="buy now limited time offer, unsubscribe here",
+                         label_ids=["INBOX", "SPAM"])
+    found = R.review_spam_folder(provider)
+    assert any("boss@corp.com" in line for line in found)
+    assert not any("junk@blaster" in line for line in found)
+    # Once a day: second call is silent.
+    assert R.review_spam_folder(provider) == []
+
+
+def test_unsub_purges_and_shows_exits(provider, cfg):
+    from mailbot.agent.chatops import build_chat_ops
+
+    archived = []
+    orig_archive = provider.archive
+    provider.archive = lambda mid: archived.append(mid) or True
+    try:
+        provider.add_message(sender="promo@shop.com", subject="sale",
+                             body="big sale! manage preferences here https://shop.com/preferences")
+        ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+        out = ops["unsub"]("promo@shop.com")
+    finally:
+        provider.archive = orig_archive
+    assert "Purged 1" in out and "shop.com/preferences" in out
+
+
+def test_unsub_refuses_the_known(provider, cfg):
+    from mailbot.agent.chatops import build_chat_ops
+    from mailbot.storage import db
+
+    db.upsert_account("google", "me@example.com", "Me")
+    db.bump_contact("google", "boss@corp.com", sent=True)
+    ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+    out = ops["unsub"]("boss@corp.com")
+    assert "know" in out
+
+
 def test_scan_never_echoes_escalations(provider, cfg, monkeypatch):
     import datetime as _dt
 

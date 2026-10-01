@@ -28,6 +28,8 @@ HELP = """\
 */approve all* — send everything queued (each still re-validated)
 */discard <id>* — drop a queued reply
 */show <id>* — read the full queued text before you decide
+*/unsub <sender>* — stop hearing from them, show exit links
+*/spam <id>* — report one message as spam
 */jev* — the fast decider: state, thresholds, last verdicts
 */security* — the nine send gates, in order
 */brain* — rebuild the voice profile
@@ -115,6 +117,12 @@ def handle_text(
 
     if cmd == "show":
         return chat_ops["show"](arg)
+
+    if cmd in ("unsub", "unsubscribe"):
+        return chat_ops["unsub"](arg)
+
+    if cmd == "spam":
+        return chat_ops["spam"](arg)
 
     if cmd == "jev":
         return chat_ops["jev"](t)

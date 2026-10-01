@@ -564,6 +564,75 @@ def verify_jev(base_url: str, api_key: str, model: str = "jev",
         return False, type(e).__name__
 
 
+def _step_service(state: dict, auto: bool = False) -> None:
+    """Install the systemd unit and, when the install is actually complete,
+    start it. With systemd present the unit is the runtime; without it the
+    fallback is `./start.sh bg`, said once."""
+    import shutil
+    import subprocess
+    import sys as _sys
+
+    from pathlib import Path as _Path
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    venv_bin = _Path(_sys.prefix) / "bin"
+    unit_src = repo / "systemd" / "mail-agent.service"
+    if shutil.which("systemctl") is None or not unit_src.exists():
+        print("  no systemd here — run `./start.sh bg` to stay up without it.")
+        state.setdefault("service", "manual")
+        return
+    dest = _Path.home() / ".config" / "systemd" / "user" / "mail-agent.service"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        text = unit_src.read_text()
+        text = text.replace("@REPO@", str(repo)).replace("@VENV@", str(_Path(_sys.prefix)))
+        if dest.exists() and dest.read_text() == text:
+            pass
+        else:
+            dest.write_text(text)
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       check=False, capture_output=True)
+        subprocess.run(["systemctl", "--user", "enable", "mail-agent.service"],
+                       check=False, capture_output=True)
+    except OSError as e:
+        print(f"  ! could not install the unit ({e}); use `./start.sh bg`.")
+        state["service"] = "failed"
+        return
+    ready = state.get("provider") == "ok" and state.get("google") == "ok"
+    if not ready:
+        print("  unit installed — not starting yet (setup is incomplete).")
+        print("  Finish setup, then: `./start.sh install-start`")
+        state["service"] = "installed"
+        return
+    go = auto
+    if not auto and _tty():
+        try:
+            ans = input("  Start the agent now? [Y/n]: ").strip().lower()
+            go = ans in ("", "y", "yes")
+        except (EOFError, KeyboardInterrupt, OSError):
+            go = False
+    if not go:
+        print("  unit installed — start with `./start.sh install-start`.")
+        state["service"] = "installed"
+        return
+    subprocess.run(["systemctl", "--user", "reset-failed", "mail-agent.service"],
+                   check=False, capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "mail-agent.service"],
+                   check=False, capture_output=True)
+    import time as _time
+
+    _time.sleep(2)
+    up = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
+                         "mail-agent.service"], check=False).returncode == 0
+    if up:
+        print("  service running — it survives reboot, restarts on crash.")
+        state["service"] = "ok"
+    else:
+        print("  ! installed but did not start — logs: "
+              "`journalctl --user -u mail-agent.service -n 30`")
+        state["service"] = "failed"
+
+
 def _run_voice(state: dict) -> None:
     if state.get("google") == "ok":
         try:
@@ -1217,13 +1286,11 @@ def cmd_setup(args, cfg) -> int:
         else:
             _run_voice(state)
 
-    # --- service ---
+    # --- service: always on, survives reboot ---
     if (not only or only == "start") and not skip_service:
         idx += 1
         _hdr(idx, "service")
-        print("  service: on Daytona/container use `./start.sh bg` "
-              "(systemd user units are unavailable there).")
-        state.setdefault("service", "manual")
+        _step_service(state, non_interactive or fast or yes)
 
     _save_state(state)
     dt = _time.perf_counter() - t0

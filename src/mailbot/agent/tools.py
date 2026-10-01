@@ -111,6 +111,20 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["message_id"],
         },
     },
+    {
+        "name": "report_spam",
+        "description": (
+            "Move a message to Spam. Trains Gmail's filters — use it for real "
+            "junk (cold outreach sequences, unsolicited promos), NEVER for mail "
+            "the user solicited, transactional mail (alerts, codes, receipts), "
+            "or anything from someone they know."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"message_id": {"type": "string"}},
+            "required": ["message_id"],
+        },
+    },
     # ----------------------------------------------------------- draft tier
     {
         "name": "create_draft",
@@ -499,6 +513,41 @@ class ToolBox:
         ok = self.p.archive(a["message_id"])
         if ok:
             db.log_action("archive", self.p.account, a["message_id"])
+        return {"ok": ok}
+
+    def _t_report_spam(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Report junk to the provider. Triage-class: reversible enough to
+        run unattended (Gmail un-spams in one tap), but guarded — solicited,
+        transactional and known-sender mail is refused, not reported."""
+        mid = a.get("message_id", "")
+        if not mid:
+            return {"ok": False, "error": "message_id is required"}
+        with db.db() as c:
+            row = c.execute("SELECT * FROM messages WHERE id=? AND account=?",
+                            (mid, self.p.account)).fetchone()
+        if row is None:
+            try:
+                m = self.p.get_message(mid) or {}
+            except Exception:
+                m = {}
+            sender, subject, body, labels = (m.get("sender", ""), m.get("subject", ""),
+                                            m.get("body") or m.get("snippet") or "",
+                                            m.get("label_ids", []))
+        else:
+            sender, subject, body, labels = (row["sender"], row["subject"],
+                                            row["body"] or row["snippet"] or "",
+                                            json.loads(row["label_ids"] or "[]"))
+        contact = db.get_contact(self.p.account, sender)
+        established = bool(contact and contact.get("sent_count") and contact.get("received_count"))
+        if established or (contact and contact.get("auto_send_ok")):
+            return {"ok": False, "error": f"refusing: {sender} is someone you know — not spam"}
+        if not guards.is_bulk(labels, body, sender, subject):
+            return {"ok": False, "error": "refusing: not bulk-shaped — archive instead"}
+        ok = self.p.report_spam(mid)
+        if ok:
+            self.stats["triaged"] += 1
+            db.log_action("spam_report", self.p.account, mid, detail=sender)
+            db.mark_processed(mid, self.p.account)
         return {"ok": ok}
 
     # ---------------------------------------------------------------- draft

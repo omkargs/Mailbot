@@ -413,6 +413,17 @@ class GmailProvider(MailProvider):
         except Exception:
             return False
 
+    def report_spam(self, message_id: str) -> bool:
+        svc = self._service()
+        try:
+            svc.users().messages().modify(
+                userId="me", id=message_id,
+                body={"removeLabelIds": ["INBOX"], "addLabelIds": ["SPAM"]}).execute()
+            return True
+        except Exception as e:
+            log.warning("report_spam failed for %s: %s", message_id, type(e).__name__)
+            return False
+
     def create_label(self, name: str) -> str | None:
         svc = self._service()
         for lbl in self.list_labels():
