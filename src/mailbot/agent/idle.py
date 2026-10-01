@@ -86,13 +86,16 @@ class IdleListener(threading.Thread):
     def _current_password(self) -> str:
         """Re-read the app password every attempt. `setup --step push` writes
         a fresh one while the daemon runs — picking it up here heals push
-        without a restart, which is the whole point of retrying at all."""
+        without a restart, which is the whole point of retrying at all.
+        Spaces are stripped: app passwords are dictated in 4-letter groups
+        and pasted with them."""
         try:
             from ..setup import read_secrets
 
-            return read_secrets().get("GOOGLE_IMAP_PASSWORD", "") or self.password
+            pw = read_secrets().get("GOOGLE_IMAP_PASSWORD", "") or self.password
         except Exception:
-            return self.password
+            pw = self.password
+        return (pw or "").replace(" ", "")
 
     def _connect(self) -> imaplib.IMAP4_SSL | None:
         try:

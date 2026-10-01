@@ -1112,11 +1112,15 @@ def cmd_setup(args, cfg) -> int:
         from .setup import read_secrets as _read_p, write_secret as _write_p
 
         s = _read_p()
+        # Present is not the same as usable: an empty or truncated value must
+        # prompt, not pass. (A stored-but-blank password once sailed through
+        # here as "stored" while push stayed down.)
+        have_pw = (s.get("GOOGLE_IMAP_PASSWORD") or "").replace(" ", "")
         if state.get("google") != "ok":
             print("  ! skipping — sign into Google first, then re-run "
                   "`mail-agent setup --step push`.")
             state.setdefault("push", "skipped")
-        elif s.get("GOOGLE_IMAP_PASSWORD"):
+        elif len(have_pw) == 16:
             print("  push: app password stored — IDLE watcher will run.")
             state["push"] = "ok"
         elif not _tty():

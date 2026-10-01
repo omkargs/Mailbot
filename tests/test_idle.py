@@ -60,6 +60,14 @@ def test_transient_failure_stays_quiet(monkeypatch):
     assert L.auth_failed is False and told == []
 
 
+def test_password_spaces_stripped(monkeypatch):
+    from mailbot import setup as S
+
+    L = _listener(password="abcd efgh ijkl mnop")
+    monkeypatch.setattr(S, "read_secrets", lambda: {}, raising=False)
+    assert L._current_password() == "abcdefghijklmnop"
+
+
 def test_fresh_password_heals_without_restart(monkeypatch):
     import imaplib
 

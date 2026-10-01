@@ -66,6 +66,23 @@ _MACHINE_MAIL = re.compile(
 )
 
 
+def clean_text(body: str) -> str:
+    """Strip markup down to the human writing. Sent-folder bodies are often
+    raw HTML (doctype, style blocks, tracking pixels) — without this the
+    "vocabulary" comes out as div/span/px and the greetings as markup.
+    """
+    import html as _html
+
+    t = (body or "").strip()
+    if "<" not in t or ">" not in t:
+        return t
+    # Style/script blocks are never writing; drop them whole before tags.
+    t = re.sub(r"(?is)<(style|script|head)[^>]*>.*?</\1\s*>", " ", t)
+    t = re.sub(r"(?s)<[^>]*>", " ", t)
+    t = _html.unescape(t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def _sent_samples(account: str, limit: int = 400) -> list[dict[str, Any]]:
     """Recent hand-written sent messages.
 
@@ -76,11 +93,20 @@ def _sent_samples(account: str, limit: int = 400) -> list[dict[str, Any]]:
     rows = db.recent_sent(account, limit=limit, since=since)
     out = []
     for r in rows:
-        body = (r.get("body") or "").strip()
+        raw = (r.get("body") or "").strip()
+        if len(raw) <= 40:
+            continue
+        if _MACHINE_MAIL.search(raw[:600]) or _MACHINE_MAIL.search(r.get("subject") or ""):
+            continue
+        body = clean_text(raw)
         if len(body) <= 40:
             continue
-        if _MACHINE_MAIL.search(body[:600]) or _MACHINE_MAIL.search(r.get("subject") or ""):
+        # Markup-dominated: a 40KB HTML blast with two human sentences is
+        # not a writing sample, it is a template wearing two sentences.
+        if len(body) < 0.3 * len(raw):
             continue
+        r = dict(r)
+        r["body"] = body
         out.append(r)
     return out
 

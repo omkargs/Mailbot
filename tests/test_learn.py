@@ -161,6 +161,37 @@ def test_proposal_never_touches_profile(cfg, tmp_path):
     assert prof.read_text() == "# mine — hands off\n"
 
 
+def test_clean_text_strips_markup():
+    from mailbot.brain.style import clean_text
+
+    html = ("<!DOCTYPE html><html><head><style>.x{color:red}</style></head>"
+            "<body><div>Hi msk, see you friday friend</div>"
+            "<img src=x><p>Thanks!</p></body></html>")
+    out = clean_text(html)
+    assert "doctype" not in out.lower() and "color" not in out
+    assert "Hi msk" in out and "Thanks!" in out
+    assert clean_text("Just plain words here friend") == "Just plain words here friend"
+    assert clean_text("") == ""
+
+
+def test_markup_dominated_mail_is_not_a_sample(cfg):
+    from mailbot.brain import style as S
+    from mailbot.storage import db
+
+    html = ("<html><head><style>" + (".x{color:red;border:1px solid blue}" * 200)
+            + "</style></head><body><div><p>Hello friend, see you friday ok</p></div>"
+              "</body></html>")
+    db.upsert_account("google", "me@example.com", "Me")
+    with db.db() as c:
+        c.execute(
+            "INSERT INTO messages (id, account, sender, subject, body, date, label_ids, stored_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            ("mhtml", "google", "me@example.com", "blast",
+             html, "2026-09-01T10:00:00+00:00", '["SENT"]', "2026-09-01T10:00:00+00:00"))
+    samples = S._sent_samples("google")
+    assert all(s["id"] != "mhtml" for s in samples)
+
+
 def test_voice_command_reports_progress(cfg):
     from mailbot.agent.chatops import build_chat_ops
     from mailbot.brain.style import record_voice_sample

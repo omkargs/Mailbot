@@ -214,15 +214,28 @@ def cmd_brain(args, cfg):
                 msgs = p.list_messages(folder=folder, limit=args.limit)
             except Exception:
                 continue
-            seeded = []
-            # Batch the bodies. Fetching hundreds of sent messages one at a
-            # time is one API call each — slow, and enough to hit Gmail's
-            # per-minute quota partway through and silently lose the sample.
-            try:
-                fulls = p.get_messages([m["id"] for m in msgs][:args.limit])
-            except Exception as e:
-                log.warning("sent-folder batch fetch failed: %s", type(e).__name__)
-                fulls = []
+                seeded = []
+            # Batched bodies in small chunks with breathing room. Fetching
+            # hundreds of sent messages at once trips Gmail's per-minute
+            # quota partway through — and the old code then fell back to
+            # single fetches, which is exactly how a quota blip becomes a
+            # 403 storm. A failed chunk is skipped, not retried into the
+            # ground; re-running later fills the gaps.
+            import time as _time
+
+            ids = [m["id"] for m in msgs][:args.limit]
+            fulls = []
+            for i in range(0, len(ids), 25):
+                try:
+                    fulls += p.get_messages(ids[i:i + 25])
+                except Exception as e:
+                    log.warning("sent-folder chunk %d failed (%s); skipping",
+                                i // 25, type(e).__name__)
+                    if "quota" in str(e).lower() or "403" in str(e):
+                        print("  Gmail quota hit — keeping what was mined; "
+                              "re-run `mail-agent brain` later for the rest.")
+                        break
+                _time.sleep(2)
             by_id = {f["id"]: f for f in fulls}
             for m in msgs:
                 full = by_id.get(m["id"])
