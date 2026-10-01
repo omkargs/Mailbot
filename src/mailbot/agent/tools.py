@@ -512,6 +512,20 @@ class ToolBox:
             return {"ok": False, "error":
                     f"refusing to draft for no-reply sender(s): {', '.join(dead)} — "
                     f"note the content instead, do not reply"}
+        # One reply, one draft: re-drafting the same mail litters the Drafts
+        # folder with twins the user must diff by hand.
+        in_reply_to = a.get("in_reply_to") or ""
+        want_to = sorted(str(x).lower() for x in (a.get("to") or []))
+        for d in db.list_drafts(self.p.account, limit=50):
+            same_thread = bool(in_reply_to) and d.get("in_reply_to") == in_reply_to
+            same_new = (not in_reply_to and not d.get("in_reply_to")
+                        and sorted(x.strip().lower() for x in (d.get("to_addr") or "").split(","))
+                        == want_to
+                        and (d.get("subject") or "") == a.get("subject", ""))
+            if same_thread or same_new:
+                self.stats["drafted"] += 1
+                return {"ok": True, "draft_id": d["id"], "reused": True,
+                        "reason": "a draft for this reply already exists — reused, not duplicated"}
         req = DraftRequest(
             to=a["to"], subject=a.get("subject", ""), body=a["body"],
             in_reply_to=a.get("in_reply_to"),
@@ -712,13 +726,44 @@ class ToolBox:
         # Otherwise queue for the user. The ping must show WHAT is being
         # approved: attachment filenames (never approve a file you cannot
         # see) and the opening of the body. Blind approvals are rubber stamps.
-        approval_id = f"ap_{uuid.uuid4().hex[:12]}"
+        #
+        # One message, one queue entry: if the same reply is already waiting,
+        # hand back the existing approval instead of queueing a twin. Scans
+        # re-run and operators re-say "send it"; neither may manufacture a
+        # second approval for the same mail.
         reasons = "; ".join(f"{addr}: {v.reason}" for addr, v in verdicts if not v.allowed)
         queued = {
             "to": to_addrs, "subject": subject, "body": body,
             "in_reply_to": a.get("in_reply_to"),
             "attachments": [x.path for x in attachments],
         }
+        dupe = db.find_pending_send(self.p.account, to_addrs,
+                                    a.get("in_reply_to") or "", subject)
+        if dupe is not None:
+            try:
+                old = json.loads(dupe["payload"])
+                old_body = {k: v for k, v in old.items() if k != "action_hash"}
+                if old_body == queued:
+                    self.stats["escalated"] += 1
+                    if not dupe.get("channel_msg_id"):
+                        # The first card never reached a channel (notify down
+                        # at the time). Silence here would lose the approval
+                        # entirely, so ping now against the existing id.
+                        ping = (f"Approval needed: reply to {recipients} — {subject}\n"
+                                f"“{' '.join(body.split())[:150]}”"
+                                f"\n\nFull text: /show {dupe['id']}")
+                        mid = self._notify(self._tagged(ping), approval_id=dupe["id"])
+                        if mid:
+                            db.mark_approval_pushed(dupe["id"], "notify", str(mid))
+                    return {"ok": True, "mode": "queued",
+                            "approval_id": dupe["id"],
+                            "reason": reasons + " (already waiting — same approval, not a new one)"}
+                # Same mail, reworded reply: the new draft replaces the old.
+                # Retire the stale card so exactly one approval is actionable.
+                db.supersede_approval(dupe["id"])
+            except (ValueError, TypeError):
+                pass
+        approval_id = f"ap_{uuid.uuid4().hex[:12]}"
         # Bind the approval to these exact bytes. run_approval recomputes the
         # hash before sending; anything that drifted in between voids it.
         queued["action_hash"] = guards.action_hash("send_message", queued)
@@ -731,6 +776,7 @@ class ToolBox:
         excerpt = " ".join(body.split())[:150]
         if excerpt:
             ping += f"\n“{excerpt}”"
+        ping += f"\n\nFull text: /show {approval_id}"
         mid = self._notify(self._tagged(ping), approval_id=approval_id)
         if mid:
             db.mark_approval_pushed(approval_id, "notify", str(mid))

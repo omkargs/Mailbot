@@ -27,6 +27,7 @@ HELP = """\
 */approve <id>* — send a queued reply
 */approve all* — send everything queued (each still re-validated)
 */discard <id>* — drop a queued reply
+*/show <id>* — read the full queued text before you decide
 */jev* — the fast decider: state, thresholds, last verdicts
 */security* — the nine send gates, in order
 */brain* — rebuild the voice profile
@@ -100,9 +101,20 @@ def handle_text(
         if cmd == "approve" and arg.lower() == "all":
             return chat_ops["approve_all"]()
         if not arg:
+            # Exactly one thing waiting and the operator said "send it" —
+            # asking them to copy an id they can already see is bureaucracy.
+            # Anything else still needs the id named.
+            from ..storage import db as _db
+
+            pend = _db.pending_approvals()
+            if cmd == "approve" and len(pend) == 1:
+                return chat_ops["approve"](pend[0]["id"], True)
             return (f"Usage: /{cmd} <id> — or /approve all — "
                     f"run /drafts to see the waiting ids.")
         return chat_ops["approve"](arg, cmd in ("approve",))
+
+    if cmd == "show":
+        return chat_ops["show"](arg)
 
     if cmd == "jev":
         return chat_ops["jev"](t)

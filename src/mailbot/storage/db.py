@@ -585,6 +585,48 @@ def pending_approvals(account: str | None = None) -> list[dict[str, Any]]:
         return [dict(r) for r in c.execute(q + " ORDER BY created_at", params)]
 
 
+def find_pending_send(account: str, to_addrs: list[str],
+                      in_reply_to: str = "", subject: str = "") -> dict[str, Any] | None:
+    """An already-queued send for the same recipients about the same thing.
+
+    One message, one card, ever — the queue is no exception. Without this,
+    every scan and every "send it" queues a FRESH approval for the same mail,
+    and the operator approves the same reply three times wondering which one
+    is real. Returns the pending row, or None.
+    """
+    want_to = sorted(str(a).lower() for a in to_addrs)
+    for p in pending_approvals(account):
+        if p["kind"] != "send":
+            continue
+        try:
+            payload = json.loads(p["payload"])
+        except (ValueError, TypeError):
+            continue
+        got_to = sorted(str(a).lower() for a in payload.get("to", []))
+        if (got_to == want_to
+                and (payload.get("in_reply_to") or "") == (in_reply_to or "")
+                and (payload.get("subject") or "") == (subject or "")):
+            return p
+    return None
+
+
+def supersede_approval(id: str) -> None:
+    """Retire a pending approval replaced by a newer draft of the same reply.
+    Superseded rows leave the pending queue but stay in history, so the audit
+    trail shows the rewrite instead of pretending the first draft never
+    existed."""
+    with db() as c:
+        c.execute("UPDATE approvals SET status='superseded' "
+                  "WHERE id=? AND status='pending'", (id,))
+
+
+def get_approval(id: str) -> dict[str, Any] | None:
+    """One approval row by id, any status. For /show and re-validation."""
+    with db() as c:
+        row = c.execute("SELECT * FROM approvals WHERE id=?", (id,)).fetchone()
+    return dict(row) if row else None
+
+
 def resolve_approval(id: str, status: str, by: str = "user") -> dict[str, Any] | None:
     with db() as c:
         c.execute(

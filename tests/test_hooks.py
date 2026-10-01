@@ -366,6 +366,68 @@ REDTEAM = [
 ]
 
 
+def test_second_queue_returns_same_approval(provider, cfg):
+    """The Msk bug: three scans, three approval cards, one mail."""
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    box = ToolBox(provider, cfg, run_id=1)
+    args = {"to": ["msk@x.com"], "subject": "Re: trip",
+            "body": "hey msk, sorry man not able to make it this time",
+            "in_reply_to": "m1"}
+    first = box.run("send_message", args)
+    second = box.run("send_message", args)
+    assert first["mode"] == "queued" and second["mode"] == "queued"
+    assert first["approval_id"] == second["approval_id"]
+    assert len(db.pending_approvals()) == 1
+    assert "already waiting" in second["reason"]
+
+
+def test_reworded_reply_supersedes_old_card(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    box = ToolBox(provider, cfg, run_id=1)
+    base = {"to": ["msk@x.com"], "subject": "Re: trip", "in_reply_to": "m1"}
+    first = box.run("send_message", {**base, "body": "hey msk, sorry man cannot make it this time"})
+    second = box.run("send_message", {**base, "body": "hey msk, long time no see man cannot make it"})
+    assert first["approval_id"] != second["approval_id"]
+    pend = db.pending_approvals()
+    assert [p["id"] for p in pend] == [second["approval_id"]]
+    assert db.get_approval(first["approval_id"])["status"] == "superseded"
+
+
+def test_draft_twice_reuses_one(provider, cfg):
+    from mailbot.agent.tools import ToolBox
+    from mailbot.storage import db
+
+    db.upsert_account("google", "me@example.com", "Me")
+    run_id = db.start_run("google", "test", "m")
+    box = ToolBox(provider, cfg, run_id=run_id)
+    args = {"to": ["msk@x.com"], "subject": "Re: trip",
+            "body": "hey msk, sorry man not able to make it",
+            "in_reply_to": "m1"}
+    first = box.run("create_draft", args)
+    second = box.run("create_draft", args)
+    assert first["ok"] and second["ok"]
+    assert first["draft_id"] == second["draft_id"]
+    assert second.get("reused") is True
+    assert len(provider.drafted) == 1
+
+
+def test_pending_proposal_lifecycle(provider, cfg):
+    from mailbot.agent.learning import pending_proposal
+    from mailbot.storage import db
+
+    assert pending_proposal("google") is None
+    db.log_action("auto_send_proposed", "google", "msk@x.com", detail="2x")
+    assert pending_proposal("google") == "msk@x.com"
+    db.set_contact_auto_send("google", "msk@x.com", True)
+    assert pending_proposal("google") is None
+
+
 def test_redteam_never_sends(provider, cfg):
     from mailbot.agent.tools import ToolBox
 

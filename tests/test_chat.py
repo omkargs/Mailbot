@@ -91,6 +91,99 @@ def test_telegram_poll_tags_owner_chat(monkeypatch):
     assert out[0]["chat"] == "telegram:8791132013"
 
 
+def test_show_prints_full_queued_text(provider, cfg):
+    from mailbot.agent import guards as _guards
+    from mailbot.agent.chatops import build_chat_ops
+    from mailbot.storage import db
+
+    body = "line one here friend " + "filler words " * 60
+    p = {"to": ["a@b.com"], "subject": "Re: hello", "body": body,
+         "in_reply_to": "m1", "attachments": []}
+    p["action_hash"] = _guards.action_hash(
+        "send_message", {k: v for k, v in p.items() if k != "action_hash"})
+    db.create_approval("ap_show1", "google", "send", p, reason="t")
+    ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+    out = ops["show"]("ap_show1")
+    assert "filler words" in out and "/approve ap_show1" in out
+    assert ops["show"]("nope") == "No approval with id 'nope'."
+    assert ops["show"]("").startswith("Usage:")
+
+
+def test_approve_bare_approves_lone_pending(provider, cfg):
+    from mailbot.agent import guards as _guards
+    from mailbot.agent.chat import handle_text
+    from mailbot.agent.chatops import build_chat_ops
+    from mailbot.storage import db
+
+    provider.auto_send = True
+    p = {"to": ["boss@corp.com"], "subject": "Re: hi",
+         "body": "hello friend, confirming friday works fine for us",
+         "in_reply_to": "", "attachments": []}
+    p["action_hash"] = _guards.action_hash(
+        "send_message", {k: v for k, v in p.items() if k != "action_hash"})
+    db.create_approval("ap_bare1", "google", "send", p, reason="t")
+    ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+    out = handle_text("/approve", cfg, {"google": provider}, ops)
+    assert out == "Sent."
+    assert len(provider.sent) == 1
+
+
+def test_approve_bare_with_several_asks_for_id(provider, cfg):
+    from mailbot.agent.chat import handle_text
+    from mailbot.agent.chatops import build_chat_ops
+    from mailbot.storage import db
+
+    db.create_approval("ap_b1", "google", "send", {"to": ["a@b.com"]}, reason="t")
+    db.create_approval("ap_b2", "google", "send", {"to": ["b@b.com"]}, reason="t")
+    ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+    out = handle_text("/approve", cfg, {"google": provider}, ops)
+    assert "Usage:" in out and provider.sent == []
+
+
+def test_yea_confirms_outstanding_proposal(provider, cfg):
+    from mailbot.agent.chatops import build_chat_ops
+    from mailbot.storage import db
+
+    db.log_action("auto_send_proposed", "google", "msk@x.com",
+                  detail="approved 2x in a row")
+    seen = {}
+    import mailbot.agent.ask as ask_mod
+
+    orig = ask_mod.answer
+
+    def spy(question, cfg_, p, history=None, notify=None):
+        seen["q"] = question
+        return "ok"
+
+    ask_mod.answer = spy
+    try:
+        ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+        ops["ask"]("yea", "owner")
+        assert "msk@x.com" in seen["q"] and "set_contact_permission" in seen["q"]
+    finally:
+        ask_mod.answer = orig
+
+
+def test_no_proposal_no_rewrite(provider, cfg):
+    import mailbot.agent.ask as ask_mod
+    from mailbot.agent.chatops import build_chat_ops
+
+    seen = {}
+    orig = ask_mod.answer
+
+    def spy(question, cfg_, p, history=None, notify=None):
+        seen["q"] = question
+        return "ok"
+
+    ask_mod.answer = spy
+    try:
+        ops = build_chat_ops(cfg, lambda: {"google": provider}, notify=None)
+        ops["ask"]("yea", "owner")
+        assert seen["q"] == "yea"
+    finally:
+        ask_mod.answer = orig
+
+
 def test_profiles_commands_are_single_inbox(cfg):
     from mailbot.agent.chat import handle_text
     from mailbot.agent.chatops import build_chat_ops

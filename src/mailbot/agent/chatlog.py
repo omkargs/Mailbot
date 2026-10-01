@@ -17,7 +17,11 @@ from ..storage import db
 
 log = logging.getLogger(__name__)
 
-MAX_TURNS = 8          # roughly the last 4 exchanges
+# Generous on purpose: long sagas (a draft, a correction, a "yea", an
+# approval) span many turns, and anything outside the window never happened
+# as far as the model is concerned. Twelve turns is ~6 exchanges — cheap in
+# tokens, expensive to lose.
+MAX_TURNS = 12
 MAX_CHARS = 1200       # truncate a long reply; the gist is what matters
 
 SCHEMA = """

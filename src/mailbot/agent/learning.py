@@ -47,6 +47,43 @@ def _already_proposed(account: str, address: str) -> bool:
     return row is not None
 
 
+def pending_proposal(account: str) -> str | None:
+    """An auto-send proposal the operator has not answered yet.
+
+    "yea" is meaningless without knowing what it answers. When the agent
+    proposed auto-send for someone and the contact is still not approved,
+    a bare yes/yea/yep from the operator means that proposal — not the last
+    message, not a draft, that standing change. Returns the address, or
+    None when nothing is outstanding.
+    """
+    from ..storage import db
+
+    with db.db() as c:
+        row = c.execute(
+            "SELECT target, ts FROM actions_log WHERE account=? AND action='auto_send_proposed'"
+            " ORDER BY id DESC LIMIT 1",
+            (account,)).fetchone()
+    if not row or not row["target"]:
+        return None
+    addr = row["target"]
+    contact = db.get_contact(account, addr)
+    if contact and contact.get("auto_send_ok"):
+        return None  # answered already (approved) — nothing outstanding
+    # A proposal from weeks ago is not what "yea" means today. Two days is
+    # generous; beyond it, ask again rather than assume.
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - ts).total_seconds() > 48 * 3600:
+            return None
+    except (ValueError, TypeError):
+        return None
+    return addr
+
+
 def maybe_suggest(account: str, address: str) -> str | None:
     """Proposal text when the streak earns it, else None. Never repeats."""
     from ..storage import db

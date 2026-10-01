@@ -145,6 +145,43 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
             return f"Could not: {res.get('error', 'unknown')}"
         return "Sent." if res.get("sent") else "Discarded."
 
+    def show(approval_id: str) -> str:
+        """The full text of a queued item. Cards carry excerpts; approvals
+        should never be granted on an excerpt, so the whole thing is one
+        command away."""
+        approval_id = (approval_id or "").strip().strip("`")
+        if not approval_id:
+            return "Usage: /show <id> — run /drafts to see the waiting ids."
+        row = db.get_approval(approval_id)
+        if not row:
+            return f"No approval with id {approval_id!r}."
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            payload = {}
+        lines = [f"*{row['kind']}* `{row['id']}` [{row['account']}]",
+                 f"status: {row['status']}",
+                 f"why it waited: {row['reason'] or '—'}", ""]
+        if row["kind"] == "send":
+            lines.append(f"To: {', '.join(payload.get('to', []))}")
+            lines.append(f"Subject: {payload.get('subject', '')}")
+            lines.append("")
+            lines.append(payload.get("body", "") or "(empty body)")
+            atts = payload.get("attachments") or []
+            if atts:
+                lines.append("")
+                lines.append(f"Attachments: {', '.join(atts)}")
+        elif row["kind"] == "calendar_delete":
+            lines.append(f"Delete event: {payload.get('event_id', '')}")
+            lines.append(f"Reason: {payload.get('reason', '')}")
+        elif row["kind"] == "calendar_invite":
+            lines.append(f"Invite: {payload.get('summary', '')} ({payload.get('start', '')})")
+            lines.append(f"Attendees: {', '.join(payload.get('attendees', []))}")
+        else:
+            lines.append(json.dumps(payload, indent=2)[:1500])
+        lines += ["", f"/approve {row['id']}  or  /discard {row['id']}"]
+        return "\n".join(lines)
+
     def approve_all() -> str:
         """Approve everything queued, in one word.
 
@@ -375,7 +412,24 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         if not provs:
             return "No mailbox is connected. Run mail-agent auth."
         p = next(iter(provs.values()))
-        return answer(question, cfg, p, history=recent(chat=chat), notify=notify)
+        q = question
+        try:
+            from .learning import pending_proposal
+
+            outstanding = pending_proposal(p.account)
+        except Exception:
+            outstanding = None
+        if outstanding and q.strip().lower() in (
+                "yea", "yeah", "yes", "yep", "yup", "ok", "okay", "sure",
+                "do it", "go ahead", "please do"):
+            # A bare yes answers the outstanding proposal — the standing
+            # change — not the last message. Say so explicitly, because the
+            # model cannot see the proposal otherwise and "yea" would draft
+            # yet another reply instead of confirming anything.
+            q = (f"{question}\n\n[System note: you previously proposed letting "
+                 f"replies to {outstanding} go out without asking. This yes "
+                 f"means that. Call set_contact_permission for {outstanding}.]")
+        return answer(q, cfg, p, history=recent(chat=chat), notify=notify)
 
     # -------------------------------------------------------------- schedule
     def schedule(text: str) -> str:
@@ -453,6 +507,7 @@ def build_chat_ops(cfg, providers_factory: Callable[[], dict[str, Any]], notify=
         "drafts": drafts,
         "approve": approve,
         "approve_all": approve_all,
+        "show": show,
         "jev": jev,
         "security": security,
         "brain": brain,

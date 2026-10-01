@@ -405,8 +405,7 @@ def _hold_jev_asks(
             continue
         question = (
             f"{m.get('sender', '')} — {m.get('subject', '') or '(no subject)'}"
-            f"{_card_flags(m)}: {v.reason} (jev {v.verdict} "
-            f"{v.confidence:.2f}, margin {v.margin:.2f})"
+            f"{_card_flags(m)}: {v.reason}"
         )
         if not db.claim_surfaced(account, m["id"], "ask", v.reason):
             # Already asked. The user knows; asking again is the noise this
