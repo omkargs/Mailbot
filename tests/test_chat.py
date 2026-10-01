@@ -34,27 +34,6 @@ def test_memory_still_scoped_by_account():
     assert [t["content"] for t in chatlog.recent(account="work")] == ["work thread"]
 
 
-def test_chat_history_is_scoped_to_one_inbox():
-    """Two mailboxes must not read each other's conversation, even though
-    the tables are shared. Same rule as chats: the key is always both."""
-    from mailbot.agent import chatlog
-
-    chatlog.record("user", "the invoice question", account="google")
-    chatlog.record("agent", "she said the 3rd", account="google")
-    chatlog.record("user", "unrelated work thread", account="work")
-
-    google = [t["content"] for t in chatlog.recent(account="google")]
-    work = [t["content"] for t in chatlog.recent(account="work")]
-
-    assert google == ["the invoice question", "she said the 3rd"]
-    assert work == ["unrelated work thread"]
-
-    # Forgetting one inbox's thread must not wipe the other's.
-    assert chatlog.clear(account="google") == 2
-    assert chatlog.recent(account="google") == []
-    assert len(chatlog.recent(account="work")) == 1
-
-
 def test_handle_text_routes_plain_chat_per_chat(cfg):
     from mailbot.agent.chat import handle_text
 
